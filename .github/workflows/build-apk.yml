@@ -49,8 +49,14 @@ jobs:
           HUSH_KEY_PASSWORD: ${{ secrets.HUSH_KEY_PASSWORD }}
         run: |
           chmod +x gradlew
-          ./gradlew --no-daemon assembleRelease
+          set -o pipefail
+          ./gradlew --no-daemon assembleRelease 2>&1 | tee build.log
           cp app/build/outputs/apk/release/app-release.apk "Hush-${VERSION_NAME}.apk"
+
+      - name: Report build errors
+        if: failure()
+        run: |
+          grep -E "error:|e: |What went wrong|FAILED" build.log | head -25 | while IFS= read -r line; do echo "::error::$line"; done || true
 
       - uses: actions/upload-artifact@v4
         with:

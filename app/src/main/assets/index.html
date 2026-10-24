@@ -105,6 +105,27 @@ input[type=range]{width:100%;accent-color:var(--accent)}
   background-position:calc(100% - 17px) 55%,calc(100% - 12px) 55%;background-size:5px 5px;background-repeat:no-repeat;cursor:pointer}
 .select:disabled{opacity:.5}
 
+.credits{gap:10px;padding-right:6px}
+.credits #credLeft{font-family:var(--mono);font-size:13px;font-variant-numeric:tabular-nums}
+.credbuy{background:var(--accent-soft);color:var(--accent);border-radius:6px;padding:3px 8px;font-size:12.5px}
+.sheet{position:fixed;inset:0;z-index:30;display:flex;align-items:flex-end;justify-content:center;background:rgba(8,14,18,.55);
+  padding-left:max(0px, env(safe-area-inset-left, 0px));padding-right:max(0px, env(safe-area-inset-right, 0px))}
+.sheetcard{width:100%;max-width:480px;background:var(--surface);color:var(--ink);border-radius:16px 16px 0 0;padding:20px 18px calc(20px + env(safe-area-inset-bottom, 0px));
+  display:flex;flex-direction:column;gap:12px;max-height:90%;overflow:auto}
+@media (min-width:600px){.sheet{align-items:center}.sheetcard{border-radius:16px}}
+.sheethead{display:flex;justify-content:space-between;align-items:center}
+.sheethead h2{margin:0;font-family:var(--display);font-size:1.35rem}
+.x{border:none;background:var(--sunk);width:34px;height:34px;border-radius:50%;font-size:20px;line-height:1;cursor:pointer;color:var(--ink)}
+.sheetmsg{margin:0;font-weight:600}
+.sheetmsg:empty{display:none}
+.packs{display:flex;flex-direction:column;gap:8px}
+.pack{display:grid;grid-template-columns:1fr auto;align-items:center;gap:4px 12px;text-align:left;border:1px solid var(--line);background:var(--surface);
+  border-radius:10px;padding:12px 14px;cursor:pointer}
+.pack:hover{border-color:var(--accent)}
+.pack .mins{font-family:var(--display);font-weight:600;font-size:17px}
+.pack .per{grid-column:1;font-size:12.5px;color:var(--muted)}
+.pack .price{grid-row:1 / span 2;grid-column:2;background:var(--accent);color:var(--accent-ink);border-radius:8px;padding:8px 14px;font-weight:600;font-variant-numeric:tabular-nums}
+.sheetstatus{margin:0;font-size:13px;color:var(--accent);min-height:1em}
 .drop{position:fixed;inset:0;display:grid;place-items:center;background:rgba(19,32,38,.55);z-index:20;color:#fff;font-family:var(--display);font-size:1.6rem;pointer-events:none}
 .foot{color:var(--muted);font-size:12.5px;max-width:75ch}
 @media (prefers-reduced-motion: reduce){*{transition:none!important}}
@@ -128,6 +149,7 @@ input[type=range]{width:100%;accent-color:var(--accent)}
       <div class="fmeta" id="fmeta">&nbsp;</div>
     </div>
     <div class="row">
+      <button class="btn credits" id="credits" hidden aria-label="Minutes left. Buy more"><span id="credLeft">0 min</span><span class="credbuy">Buy</span></button>
       <label class="btn primary" for="file">Open audio or video</label>
       <input type="file" id="file" accept="audio/*,video/*,.wav,.mp3,.m4a,.aac,.flac,.ogg,.oga,.opus,.webm,.weba,.mp4,.m4v,.mov,.mkv,.3gp,.amr,.aif,.aiff,.caf,.ts" hidden>
     </div>
@@ -204,6 +226,15 @@ input[type=range]{width:100%;accent-color:var(--accent)}
   <p class="foot">How it works: the audio is split into overlapping 43 ms frames. A noise profile is measured, then each frequency bin gets a gain from a log-spectral amplitude estimator with speech-presence detection, which keeps voice detail while avoiding the warbling “musical noise” of simple gates. Hum is cut with narrow notch filters, and stereo images are kept intact. Works best on speech. Music with sustained notes can lose some tone at high settings.</p>
 </div>
 <div class="drop" id="drop" hidden>Drop to clean this file</div>
+<div class="sheet" id="sheet" hidden role="dialog" aria-modal="true" aria-labelledby="sheetTitle">
+  <div class="sheetcard">
+    <div class="sheethead"><h2 id="sheetTitle">Buy minutes</h2><button class="x" id="sheetClose" aria-label="Close">&times;</button></div>
+    <p class="sheetmsg" id="sheetMsg"></p>
+    <div class="packs" id="packs"></div>
+    <p class="cap">Cleaning and previewing are always free. Minutes are used only when you save, rounded up to the next minute. Saving the same recording again in another format is free.</p>
+    <p class="sheetstatus" id="sheetStatus" role="status"></p>
+  </div>
+</div>
 
 <script type="text/plain" id="dsp-src">
 "use strict";
@@ -891,6 +922,7 @@ function updateFile() {
   $("fmeta").textContent = `${S.hasVideo ? "video · " : ""}${fmt(o.duration)} · ${(o.sampleRate / 1000).toFixed(1).replace(/\.0$/, "")} kHz · ${ch}`;
   const ax = $("taxis").children; ax[0].textContent = "0:00"; ax[1].textContent = fmtShort(o.duration / 2); ax[2].textContent = fmtShort(o.duration);
   updateClock();
+  if (typeof noteForFormat === "function" && dl !== undefined) try { noteForFormat(); } catch (e) {}
 }
 $("file").addEventListener("change", e => { loadFile(e.target.files[0]); e.target.value = ""; });
 let dragDepth = 0;
@@ -1034,6 +1066,9 @@ function noteForFormat() {
   else if (f.video) t = (S.videoMime === "video/x-vnd.on2.vp8" || S.videoMime === "video/x-vnd.on2.vp9" ? "WebM" : "MP4") + " with the original picture untouched and the cleaned sound swapped in. Saves to Downloads/Hush.";
   else if (dl.native) t = "Saves to Downloads/Hush on this phone.";
   else t = "Saved inside a .zip, since this view can't hand over " + f.ext.toUpperCase() + " files directly.";
+  if (native && dl && S.orig) {
+    t += S.paid.has(clipKey()) ? " Already paid for this recording, so saving again is free." : " Uses " + fmtMin(costFor(S.orig)) + " of your " + fmtMin(credit.balance) + ".";
+  }
   $("dlNote").textContent = t;
 }
 function buildFormats() {
@@ -1054,14 +1089,6 @@ function buildFormats() {
 $("fmt").addEventListener("change", noteForFormat);
 
 let dl = null;
-if (native) { dl = { native: true }; buildFormats(); }
-else {
-  buildFormats();
-  (async () => {
-    try { dl = window.claude && window.claude.use ? await window.claude.use("downloads") : null; } catch (e) { dl = null; }
-    $("dl").disabled = !(dl && S.clean); noteForFormat();
-  })();
-}
 
 // Encode in a worker so the screen stays responsive.
 function encodeJS(format, buf, onProg) {
@@ -1158,12 +1185,93 @@ function zipOne(name, data) {
   ev.setUint32(12, cd.length, true); ev.setUint32(16, lh.length + sz, true);
   return new Blob([lh, data, cd, end], { type: "application/zip" });
 }
+/* ---------- credits (Android app) ---------- */
+const DEFAULT_PACKS = [
+  { id: "minutes_60", minutes: 60, price: "₹49" },
+  { id: "minutes_150", minutes: 150, price: "₹99" },
+  { id: "minutes_400", minutes: 400, price: "₹199" }
+];
+let packs = DEFAULT_PACKS, pendingNeed = 0;
+const credit = { balance: native ? Number(native.credits()) || 0 : Infinity };
+const fmtMin = sec => Math.floor(sec / 60) + " min";
+const clipKey = () => S.orig ? S.name + "|" + S.orig.length + "|" + S.orig.sampleRate : "";
+const costFor = buf => Math.max(1, Math.ceil(buf.duration / 60 - 1e-6)) * 60;
+S.paid = new Set();
+function renderCredits() {
+  if (!native) return;
+  $("credits").hidden = false;
+  $("credLeft").textContent = fmtMin(credit.balance) + " left";
+}
+function renderPacks() {
+  const box = $("packs"); box.textContent = "";
+  for (const pk of packs) {
+    const b = document.createElement("button"); b.className = "pack"; b.type = "button";
+    const amount = parseFloat(String(pk.price).replace(/[^0-9.]/g, ""));
+    const m = document.createElement("span"); m.className = "mins"; m.textContent = pk.minutes + " minutes";
+    const per = document.createElement("span"); per.className = "per";
+    per.textContent = amount ? "About " + String(pk.price).replace(/[0-9.,\s]+/g, "") + (amount / pk.minutes).toFixed(2) + " per minute" : "";
+    const pr = document.createElement("span"); pr.className = "price"; pr.textContent = pk.price;
+    b.append(m, pr, per);
+    b.addEventListener("click", () => {
+      $("sheetStatus").textContent = "Opening Google Play…";
+      const err = native.buy(pk.id);
+      if (err) $("sheetStatus").textContent = err;
+    });
+    box.appendChild(b);
+  }
+}
+function openSheet(msg) {
+  $("sheetMsg").textContent = msg || "";
+  $("sheetStatus").textContent = "";
+  renderPacks(); $("sheet").hidden = false; $("sheetClose").focus();
+}
+function closeSheet() { $("sheet").hidden = true; pendingNeed = 0; }
+$("sheetClose").addEventListener("click", closeSheet);
+$("sheet").addEventListener("click", e => { if (e.target.id === "sheet") closeSheet(); });
+document.addEventListener("keydown", e => { if (e.key === "Escape" && !$("sheet").hidden) closeSheet(); });
+$("credits").addEventListener("click", () => openSheet(""));
+window.__hushPacks = json => {
+  try { const a = JSON.parse(json); packs = DEFAULT_PACKS.map(d => Object.assign({}, d, a.find(x => x.id === d.id && x.price) || {})); } catch (e) {}
+  if (!$("sheet").hidden) renderPacks();
+};
+window.__hushCredits = json => {
+  let m; try { m = JSON.parse(json); } catch (e) { return; }
+  credit.balance = Number(m.balance) || 0; renderCredits(); noteForFormat();
+  if (m.message) $("sheetStatus").textContent = m.message;
+  if (pendingNeed && credit.balance >= pendingNeed && !$("sheet").hidden) {
+    closeSheet(); $("dlNote").textContent = (m.message ? m.message + " " : "") + "Tap Save to continue.";
+  }
+};
+if (native) { renderCredits(); try { window.__hushPacks(native.packs()); } catch (e) {} }
+if (native) { dl = { native: true }; buildFormats(); }
+else {
+  buildFormats();
+  (async () => {
+    try { dl = window.claude && window.claude.use ? await window.claude.use("downloads") : null; } catch (e) { dl = null; }
+    $("dl").disabled = !(dl && S.clean); noteForFormat();
+  })();
+}
+
 $("dl").addEventListener("click", async () => {
   if (!dl || !S.clean) return;
   const f = FORMATS.find(x => x.id === $("fmt").value) || FORMATS[0];
   const btn = $("dl"), sel = $("fmt"), note = t => { $("dlNote").textContent = t; };
   btn.disabled = true; sel.disabled = true;
   const base = ((S.name || "audio").replace(/\.[^.]+$/, "").replace(/[\\/:*?"<>|]+/g, "_") || "audio") + "-clean";
+  const key = clipKey();
+  const charge = native && !S.paid.has(key) ? costFor(S.clean) : 0;
+  if (charge && credit.balance < charge) {
+    pendingNeed = charge;
+    openSheet("Saving this recording uses " + fmtMin(charge) + ". You have " + fmtMin(credit.balance) + ".");
+    btn.disabled = false; sel.disabled = false; return;
+  }
+  const spend = () => {
+    if (!charge) return "";
+    const nb = Number(native.spend(charge));
+    if (nb < 0) return "";
+    credit.balance = nb; S.paid.add(key); renderCredits();
+    return " Used " + fmtMin(charge) + ", " + fmtMin(nb) + " left.";
+  };
   try {
     if (f.native) {
       note("Preparing audio…");
@@ -1173,12 +1281,12 @@ $("dl").addEventListener("click", async () => {
       await pushChunks(pcm, b => native.pcmWrite(b), p => note("Preparing audio " + pct(0.5 + p * 0.5)));
       const e1 = native.pcmEnd(); if (e1) throw new Error(e1);
       const r = await nativeJob(id => native.exportMedia(id, f.id, base), p => note((f.video ? "Building video " : "Encoding ") + pct(p)));
-      note("Saved to " + r.path + ".");
+      note("Saved to " + r.path + "." + spend());
     } else {
       const bytes = await encodeJS(f.id, S.clean, p => note("Encoding " + pct(p)));
       if (dl.native) {
         const where = await saveNative(base + "." + f.ext, f.mime, bytes, p => note("Saving " + pct(p)));
-        note("Saved to " + where + ".");
+        note("Saved to " + where + "." + spend());
       } else {
         note("Preparing download…");
         await dl.save({ filename: base + ".zip", data: zipOne(base + "." + f.ext, bytes) });

@@ -5,6 +5,7 @@ import android.content.ActivityNotFoundException;
 import android.content.ContentResolver;
 import android.content.ContentValues;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.res.Configuration;
 import android.database.Cursor;
 import android.graphics.Insets;
@@ -36,6 +37,19 @@ import android.widget.FrameLayout;
 
 import androidx.webkit.WebViewAssetLoader;
 
+import com.android.billingclient.api.BillingClient;
+import com.android.billingclient.api.BillingClientStateListener;
+import com.android.billingclient.api.BillingFlowParams;
+import com.android.billingclient.api.BillingResult;
+import com.android.billingclient.api.ConsumeParams;
+import com.android.billingclient.api.PendingPurchasesParams;
+import com.android.billingclient.api.ProductDetails;
+import com.android.billingclient.api.Purchase;
+import com.android.billingclient.api.QueryProductDetailsParams;
+import com.android.billingclient.api.QueryPurchasesParams;
+
+import org.json.JSONArray;
+
 import org.json.JSONObject;
 
 import java.io.BufferedInputStream;
@@ -50,6 +64,12 @@ import java.io.RandomAccessFile;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -70,6 +90,14 @@ public class MainActivity extends Activity {
     private String pendingOpenName;
     private boolean pageReady;
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
+
+    /* Credits: seconds of cleaned audio the user can save. Sold as consumable Play products. */
+    private static final String[] PACKS = {"minutes_60", "minutes_150", "minutes_400"};
+    private static final int FREE_SECONDS_ON_INSTALL = 5 * 60;
+    private SharedPreferences prefs;
+    private BillingClient billing;
+    private volatile boolean billingReady;
+    private final Map<String, ProductDetails> packDetails = new HashMap<>();
 
     @Override
     @SuppressWarnings("deprecation")
@@ -165,6 +193,13 @@ public class MainActivity extends Activity {
             }
         });
 
+        prefs = getSharedPreferences("hush", MODE_PRIVATE);
+        if (!prefs.getBoolean("trial_given", false)) {
+            prefs.edit().putBoolean("trial_given", true)
+                    .putLong("credits", prefs.getLong("credits", 0) + FREE_SECONDS_ON_INSTALL).apply();
+        }
+        setupBilling();
+
         web.addJavascriptInterface(new Bridge(), "HushNative");
         web.loadUrl("https://" + HOST + "/assets/index.html");
         handleIncoming(getIntent());
@@ -228,7 +263,14 @@ public class MainActivity extends Activity {
     }
 
     @Override
+    protected void onResume() {
+        super.onResume();
+        if (billingReady) restorePurchases();
+    }
+
+    @Override
     protected void onDestroy() {
+        if (billing != null) billing.endConnection();
         worker.shutdownNow();
         if (web != null) {
             web.removeJavascriptInterface("HushNative");
@@ -674,12 +716,191 @@ public class MainActivity extends Activity {
         }
     }
 
+    /* ---------------- credits and Google Play Billing ---------------- */
+
+    private static int minutesFor(String productId) {
+        switch (productId) {
+            case "minutes_60": return 60;
+            case "minutes_150": return 150;
+            case "minutes_400": return 400;
+            default: return 0;
+        }
+    }
+
+    private synchronized long credits() {
+        return prefs.getLong("credits", 0);
+    }
+
+    private synchronized long addCredits(long seconds) {
+        long v = Math.max(0, prefs.getLong("credits", 0) + seconds);
+        prefs.edit().putLong("credits", v).apply();
+        return v;
+    }
+
+    private void setupBilling() {
+        billing = BillingClient.newBuilder(this)
+                .setListener((result, purchases) -> {
+                    int code = result.getResponseCode();
+                    if (code == BillingClient.BillingResponseCode.OK && purchases != null) {
+                        for (Purchase p : purchases) handlePurchase(p);
+                    } else if (code == BillingClient.BillingResponseCode.USER_CANCELED) {
+                        notifyCredits("Purchase cancelled.");
+                    } else if (code == BillingClient.BillingResponseCode.ITEM_ALREADY_OWNED) {
+                        restorePurchases();
+                    } else {
+                        notifyCredits("The purchase didn't go through. Please try again.");
+                    }
+                })
+                .enablePendingPurchases(PendingPurchasesParams.newBuilder().enableOneTimeProducts().build())
+                .build();
+        billing.startConnection(new BillingClientStateListener() {
+            @Override
+            public void onBillingSetupFinished(BillingResult result) {
+                if (result.getResponseCode() == BillingClient.BillingResponseCode.OK) {
+                    billingReady = true;
+                    loadPacks();
+                    restorePurchases();
+                }
+            }
+
+            @Override
+            public void onBillingServiceDisconnected() {
+                billingReady = false;
+            }
+        });
+    }
+
+    private void loadPacks() {
+        List<QueryProductDetailsParams.Product> list = new ArrayList<>();
+        for (String id : PACKS) {
+            list.add(QueryProductDetailsParams.Product.newBuilder()
+                    .setProductId(id).setProductType(BillingClient.ProductType.INAPP).build());
+        }
+        billing.queryProductDetailsAsync(QueryProductDetailsParams.newBuilder().setProductList(list).build(),
+                (result, details) -> {
+                    if (details != null) {
+                        synchronized (packDetails) {
+                            for (ProductDetails d : details) packDetails.put(d.getProductId(), d);
+                        }
+                    }
+                    final String js = "window.__hushPacks && window.__hushPacks(" + JSONObject.quote(packsJson()) + ")";
+                    runOnUiThread(() -> {
+                        if (web != null) web.evaluateJavascript(js, null);
+                    });
+                });
+    }
+
+    private String packsJson() {
+        JSONArray a = new JSONArray();
+        synchronized (packDetails) {
+            for (String id : PACKS) {
+                try {
+                    JSONObject o = new JSONObject().put("id", id).put("minutes", minutesFor(id));
+                    ProductDetails d = packDetails.get(id);
+                    if (d != null && d.getOneTimePurchaseOfferDetails() != null) {
+                        o.put("price", d.getOneTimePurchaseOfferDetails().getFormattedPrice());
+                    }
+                    a.put(o);
+                } catch (Exception ignored) {
+                }
+            }
+        }
+        return a.toString();
+    }
+
+    private void restorePurchases() {
+        billing.queryPurchasesAsync(QueryPurchasesParams.newBuilder()
+                        .setProductType(BillingClient.ProductType.INAPP).build(),
+                (result, purchases) -> {
+                    if (result.getResponseCode() == BillingClient.BillingResponseCode.OK && purchases != null) {
+                        for (Purchase p : purchases) handlePurchase(p);
+                    }
+                });
+    }
+
+    /** Grants minutes once per purchase token, then consumes it so the pack can be bought again. */
+    private void handlePurchase(Purchase p) {
+        if (p.getPurchaseState() == Purchase.PurchaseState.PENDING) {
+            notifyCredits("Payment pending. Your minutes will be added when it completes.");
+            return;
+        }
+        if (p.getPurchaseState() != Purchase.PurchaseState.PURCHASED) return;
+        final String token = p.getPurchaseToken();
+        int minutes = 0;
+        synchronized (this) {
+            Set<String> granted = new HashSet<>(prefs.getStringSet("granted", Collections.<String>emptySet()));
+            if (!granted.contains(token)) {
+                for (String id : p.getProducts()) minutes += minutesFor(id) * Math.max(1, p.getQuantity());
+                granted.add(token);
+                prefs.edit().putStringSet("granted", granted).apply();
+                addCredits(minutes * 60L);
+            }
+        }
+        if (minutes > 0) notifyCredits("Added " + minutes + " minutes.");
+        billing.consumeAsync(ConsumeParams.newBuilder().setPurchaseToken(token).build(), (result, t) -> {
+        });
+    }
+
+    private void notifyCredits(String message) {
+        try {
+            JSONObject o = new JSONObject().put("balance", credits()).put("message", message);
+            final String js = "window.__hushCredits && window.__hushCredits(" + JSONObject.quote(o.toString()) + ")";
+            runOnUiThread(() -> {
+                if (web != null) web.evaluateJavascript(js, null);
+            });
+        } catch (Exception ignored) {
+        }
+    }
+
     /* ---------------- bridge ---------------- */
 
     private class Bridge {
         private OutputStream out;
         private Download saving;
         private OutputStream pcmOut;
+
+        /** Seconds of credit left. */
+        @JavascriptInterface
+        public double credits() {
+            return MainActivity.this.credits();
+        }
+
+        /** Deducts seconds after a successful save. Returns the new balance, or -1 if not enough. */
+        @JavascriptInterface
+        public double spend(int seconds) {
+            synchronized (MainActivity.this) {
+                long have = MainActivity.this.credits();
+                if (seconds < 0 || have < seconds) return -1;
+                return addCredits(-seconds);
+            }
+        }
+
+        @JavascriptInterface
+        public String packs() {
+            return packsJson();
+        }
+
+        /** Opens Google Play's purchase sheet. Returns "" or a reason it can't. */
+        @JavascriptInterface
+        public String buy(String productId) {
+            if (!billingReady) return "Buying minutes works once Hush is installed from Google Play.";
+            final ProductDetails d;
+            synchronized (packDetails) {
+                d = packDetails.get(productId);
+            }
+            if (d == null) return "That pack isn't available right now. Try again in a moment.";
+            runOnUiThread(() -> {
+                BillingFlowParams params = BillingFlowParams.newBuilder()
+                        .setProductDetailsParamsList(Collections.singletonList(
+                                BillingFlowParams.ProductDetailsParams.newBuilder().setProductDetails(d).build()))
+                        .build();
+                BillingResult r = billing.launchBillingFlow(MainActivity.this, params);
+                if (r.getResponseCode() != BillingClient.BillingResponseCode.OK) {
+                    notifyCredits("Google Play couldn't open the purchase. Please try again.");
+                }
+            });
+            return "";
+        }
 
         /** Start saving an already-encoded file (WAV, FLAC, MP3, AIFF) to Downloads/Hush. */
         @JavascriptInterface

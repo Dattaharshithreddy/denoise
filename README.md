@@ -18,6 +18,22 @@ Background noise remover for voice and video recordings. Android app (APK) built
 | OGG (Opus 160 kbps) | Android MediaCodec |
 | Video (MP4 or WebM) | original video track copied untouched, cleaned audio muxed in |
 
+## Selling minutes
+
+Cleaning and previewing are free. Saving costs minutes of credit, rounded up per recording; re-saving the same recording in another format is free. New installs get 5 free minutes (`FREE_SECONDS_ON_INSTALL` in `MainActivity.java`).
+
+Create these **one-time (consumable) in-app products** in Play Console → Monetize → Products → In-app products. The IDs must match exactly:
+
+| Product ID | Minutes | Suggested price |
+| --- | --- | --- |
+| `minutes_60` | 60 | ₹49 |
+| `minutes_150` | 150 | ₹99 |
+| `minutes_400` | 400 | ₹199 |
+
+Prices shown in the app come from Play, so you can change them in Play Console without a new build. Purchases are granted once per purchase token and then consumed so packs can be bought again. The balance is stored on the device.
+
+Play Billing only works for builds installed from Google Play. Test purchases with an internal testing track and license testers (Play Console → Setup → License testing).
+
 ## How the denoiser works
 
 All in `app/src/main/assets/index.html`, no third-party audio libraries:

@@ -14,11 +14,7 @@ All in `app/src/main/assets/index.html`, no third-party audio libraries:
 
 ## Building
 
-Pushing to `main` builds an APK artifact. Pushing a tag like `v1.0.1` builds and publishes a GitHub release:
-
-```
-git tag v1.0.1 && git push origin v1.0.1
-```
+Every push to `main` builds the APK. If the version in `VERSION` has no release yet, the workflow tags it and publishes a GitHub release with the APK attached. To ship an update, bump `VERSION` (for example to `1.0.1`) and push. Pushing a `v*` tag also works.
 
 Local build (Android SDK required): `./gradlew assembleRelease`.
 

@@ -1,0 +1,893 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0;font:14px system-ui,sans-serif}img{max-width:100%}[hidden]{display:none!important}</style></head><body>
+<title>Hush Denoiser</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Familjen+Grotesk:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: an instrument panel. Wide stage of before/after spectrograms with the transport under it; a narrow rack of controls on the right; stacks on phones. */
+:root{
+  --bg:#EDF1F2; --surface:#FFFFFF; --sunk:#E3E9EB; --ink:#132026; --muted:#5A6970; --line:#CBD5D8;
+  --accent:#2343C4; --accent-ink:#FFFFFF; --accent-soft:#DCE3FB; --good:#17795A; --warn:#A6551A;
+  --display:"Familjen Grotesk", "Helvetica Neue", Arial, sans-serif;
+  --body:"IBM Plex Sans", "Segoe UI", Roboto, Arial, sans-serif;
+  --mono:"IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --radius:10px;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#0E1417; --surface:#162026; --sunk:#111A1F; --ink:#E4ECEE; --muted:#8C9CA3; --line:#26343B;
+  --accent:#8199FF; --accent-ink:#0B1230; --accent-soft:#1E2A55; --good:#4CC79A; --warn:#E59A5C; color-scheme:dark;}}
+:root[data-theme="dark"]{
+  --bg:#0E1417; --surface:#162026; --sunk:#111A1F; --ink:#E4ECEE; --muted:#8C9CA3; --line:#26343B;
+  --accent:#8199FF; --accent-ink:#0B1230; --accent-soft:#1E2A55; --good:#4CC79A; --warn:#E59A5C; color-scheme:dark;}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--ink);font-family:var(--body);font-size:15px;line-height:1.5;
+  padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px));padding-block:28px 48px}
+.wrap{max-width:1120px;margin:0 auto;display:flex;flex-direction:column;gap:20px}
+button,input,label{font:inherit;color:inherit}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+.top{display:flex;align-items:flex-end;justify-content:space-between;gap:16px 32px;flex-wrap:wrap}
+.brand{display:flex;align-items:center;gap:12px}
+.brand h1{font-family:var(--display);font-weight:700;font-size:2.4rem;letter-spacing:-0.02em;margin:0;line-height:1}
+.mark{width:40px;height:40px;border-radius:9px;background:var(--ink);display:grid;place-items:center}
+.mark svg{display:block}
+.lede{margin:0;max-width:52ch;color:var(--muted);text-wrap:pretty}
+
+.filebar{display:flex;align-items:center;justify-content:space-between;gap:12px 20px;flex-wrap:wrap;
+  background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:14px 16px}
+.fileinfo{display:flex;flex-direction:column;min-width:0}
+.fname{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:flex;gap:8px;align-items:center;min-width:0}
+.fname span{overflow:hidden;text-overflow:ellipsis}
+.tag{font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:.08em;padding:2px 7px;border-radius:5px;background:var(--accent-soft);color:var(--accent);flex:none}
+.fmeta{font-family:var(--mono);font-size:12.5px;color:var(--muted);font-variant-numeric:tabular-nums}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;border-radius:8px;padding:9px 14px;font-weight:600;font-size:14px;
+  border:1px solid var(--line);background:var(--surface);cursor:pointer;white-space:nowrap}
+.btn:hover{border-color:var(--muted)}
+.btn.primary{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+.btn.primary:hover{filter:brightness(1.08)}
+.btn:disabled{opacity:.45;cursor:not-allowed;filter:none}
+.btn.small{padding:6px 10px;font-size:13px}
+
+.work{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:20px;align-items:start}
+@media (max-width:860px){.work{grid-template-columns:minmax(0,1fr)}}
+
+.stagecol{display:flex;flex-direction:column;gap:10px;min-width:0}
+.stage{position:relative;display:flex;flex-direction:column;gap:6px;user-select:none;touch-action:pan-y;cursor:crosshair}
+.panel{position:relative;border-radius:8px;overflow:hidden;background:#0A0F1E;height:190px}
+.panel canvas{display:block;width:100%;height:100%}
+.plabel{position:absolute;top:8px;right:10px;font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;
+  color:#E8EEFF;background:rgba(10,15,30,.62);padding:3px 8px;border-radius:5px;pointer-events:none}
+.ftick{position:absolute;left:8px;font-family:var(--mono);font-size:10px;color:rgba(232,238,255,.72);transform:translateY(-50%);pointer-events:none;
+  text-shadow:0 1px 2px rgba(0,0,0,.8)}
+.ftick::before{content:"";position:absolute;left:-8px;top:50%;width:5px;border-top:1px solid rgba(232,238,255,.5)}
+.sel{position:absolute;top:0;bottom:0;background:rgba(129,153,255,.20);border-left:1.5px solid #9DB0FF;border-right:1.5px solid #9DB0FF;pointer-events:none}
+.head{position:absolute;top:0;bottom:0;width:2px;margin-left:-1px;background:#FFFFFF;box-shadow:0 0 0 1px rgba(0,0,0,.35);pointer-events:none;left:0}
+.busyveil{position:absolute;inset:0;display:grid;place-items:center;background:rgba(10,15,30,.35);color:#fff;font-family:var(--mono);font-size:13px;pointer-events:none}
+.timeaxis{display:flex;justify-content:space-between;font-family:var(--mono);font-size:11.5px;color:var(--muted);font-variant-numeric:tabular-nums}
+
+.transport{display:flex;align-items:center;gap:12px 16px;flex-wrap:wrap;background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:10px 12px}
+.play{width:44px;height:44px;border-radius:50%;border:none;background:var(--ink);color:var(--bg);display:grid;place-items:center;cursor:pointer;flex:none}
+.play:disabled{opacity:.4;cursor:not-allowed}
+.clock{font-family:var(--mono);font-size:14px;font-variant-numeric:tabular-nums;min-width:12ch}
+.seg{display:inline-flex;background:var(--sunk);border-radius:8px;padding:3px;gap:2px}
+.seg button{border:none;background:transparent;padding:6px 12px;border-radius:6px;font-size:13.5px;font-weight:600;color:var(--muted);cursor:pointer}
+.seg button[aria-pressed="true"]{background:var(--surface);color:var(--ink);box-shadow:0 1px 2px rgba(0,0,0,.12)}
+.seg.ab button[aria-pressed="true"]{background:var(--accent);color:var(--accent-ink)}
+.hint{color:var(--muted);font-size:13px;margin-left:auto}
+@media (max-width:600px){.hint{margin-left:0;flex-basis:100%}}
+.status{font-family:var(--mono);font-size:12px;padding:3px 8px;border-radius:5px;background:var(--sunk);color:var(--muted)}
+.status.ok{color:var(--good)} .status.err{color:var(--warn)}
+
+.controls{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);display:flex;flex-direction:column}
+.group{padding:16px;display:flex;flex-direction:column;gap:8px;border-top:1px solid var(--line)}
+.group:first-child{border-top:none}
+.ghead{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
+.glabel{font-family:var(--display);font-weight:600;font-size:15px}
+.gval{font-family:var(--mono);font-size:13px;color:var(--accent);font-variant-numeric:tabular-nums}
+.cap{margin:0;font-size:12.5px;color:var(--muted);line-height:1.45}
+input[type=range]{width:100%;accent-color:var(--accent)}
+.scale{display:flex;justify-content:space-between;font-family:var(--mono);font-size:10.5px;color:var(--muted)}
+.row{display:flex;gap:8px;flex-wrap:wrap}
+.switch{display:flex;align-items:flex-start;gap:10px;cursor:pointer}
+.switch input{appearance:none;flex:none;width:34px;height:20px;border-radius:10px;background:var(--line);position:relative;cursor:pointer;margin:1px 0 0;transition:background .15s}
+.switch input::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;transition:transform .15s;box-shadow:0 1px 2px rgba(0,0,0,.25)}
+.switch input:checked{background:var(--accent)}
+.switch input:checked::after{transform:translateX(14px)}
+.switch .t{display:flex;flex-direction:column}
+.switch .t b{font-weight:600;font-size:14px}
+.readout{display:grid;grid-template-columns:1fr auto;gap:4px 12px;font-size:13px}
+.readout dt{color:var(--muted)} .readout dd{margin:0;font-family:var(--mono);font-variant-numeric:tabular-nums;text-align:right}
+.readout .big{font-size:20px;color:var(--good);font-weight:500}
+.dlnote{font-size:12px;color:var(--muted);margin:0}
+
+.drop{position:fixed;inset:0;display:grid;place-items:center;background:rgba(19,32,38,.55);z-index:20;color:#fff;font-family:var(--display);font-size:1.6rem;pointer-events:none}
+.foot{color:var(--muted);font-size:12.5px;max-width:75ch}
+@media (prefers-reduced-motion: reduce){*{transition:none!important}}
+@media (max-width:600px){.panel{height:140px}.brand h1{font-size:2rem}}
+</style>
+
+<div class="wrap">
+  <header class="top">
+    <div class="brand">
+      <div class="mark" aria-hidden="true">
+        <svg width="24" height="20" viewBox="0 0 24 20"><g stroke="#EDF1F2" stroke-width="2" stroke-linecap="round"><line x1="3" y1="8" x2="3" y2="12"/><line x1="7.5" y1="4" x2="7.5" y2="16"/><line x1="12" y1="1" x2="12" y2="19"/><line x1="16.5" y1="5" x2="16.5" y2="15"/><line x1="21" y1="9" x2="21" y2="11"/></g></svg>
+      </div>
+      <h1>Hush</h1>
+    </div>
+    <p class="lede">Removes fan noise, hiss, mains hum and room tone from voice recordings. Processing runs on this device. Your audio is never uploaded.</p>
+  </header>
+
+  <section class="filebar">
+    <div class="fileinfo">
+      <div class="fname"><span id="fname">Loading example…</span><span class="tag" id="demotag" hidden>Example clip</span></div>
+      <div class="fmeta" id="fmeta">&nbsp;</div>
+    </div>
+    <div class="row">
+      <label class="btn primary" for="file">Open audio or video</label>
+      <input type="file" id="file" accept="audio/*,video/*,.wav,.mp3,.m4a,.aac,.flac,.ogg,.opus,.webm,.mp4,.mov" hidden>
+    </div>
+  </section>
+
+  <main class="work">
+    <div class="stagecol">
+      <div class="stage" id="stage" aria-label="Spectrograms. Click to jump, drag to select a section.">
+        <div class="panel"><canvas id="cvIn" width="1200" height="200"></canvas><span class="plabel">Before</span><div class="ticks" id="tIn"></div></div>
+        <div class="panel"><canvas id="cvOut" width="1200" height="200"></canvas><span class="plabel">After</span><div class="ticks" id="tOut"></div><div class="busyveil" id="veil" hidden>Cleaning…</div></div>
+        <div class="sel" id="sel" hidden></div>
+        <div class="head" id="head"></div>
+      </div>
+      <div class="timeaxis" id="taxis"><span>0:00</span><span></span><span></span></div>
+      <div class="transport">
+        <button class="play" id="play" aria-label="Play" disabled>
+          <svg id="icoPlay" width="16" height="18" viewBox="0 0 16 18"><path d="M2 1.5v15l12.5-7.5z" fill="currentColor"/></svg>
+          <svg id="icoPause" width="16" height="18" viewBox="0 0 16 18" hidden><rect x="2" y="1.5" width="4" height="15" rx="1" fill="currentColor"/><rect x="10" y="1.5" width="4" height="15" rx="1" fill="currentColor"/></svg>
+        </button>
+        <span class="clock" id="clock">0:00.0 / 0:00.0</span>
+        <div class="seg ab" role="group" aria-label="Listen to">
+          <button id="lOrig" aria-pressed="false">Original</button>
+          <button id="lClean" aria-pressed="true">Cleaned</button>
+        </div>
+        <span class="status" id="status">Starting</span>
+        <span class="hint" id="hint">Click to jump. Drag to loop a section. Space plays.</span>
+      </div>
+    </div>
+
+    <aside class="controls" aria-label="Settings">
+      <div class="group">
+        <div class="ghead"><span class="glabel">Reduction</span><span class="gval" id="redVal">20 dB</span></div>
+        <input type="range" id="red" min="6" max="40" step="1" value="20" aria-describedby="redCap">
+        <div class="scale"><span>Gentle</span><span>Strong</span></div>
+        <p class="cap" id="redCap">How far the noise is pushed down. Around 15–25 dB keeps voices natural. Higher values remove more and can sound thinner.</p>
+      </div>
+      <div class="group">
+        <div class="ghead"><span class="glabel">Noise type</span></div>
+        <div class="seg" role="group" aria-label="Noise type">
+          <button id="mSteady" aria-pressed="true">Steady</button>
+          <button id="mChanging" aria-pressed="false">Changing</button>
+        </div>
+        <p class="cap" id="modeCap">Steady suits fans, AC, hiss and computer hum. It gives the cleanest result.</p>
+      </div>
+      <div class="group">
+        <div class="ghead"><span class="glabel">Noise sample</span><span class="gval" id="nsVal">Auto</span></div>
+        <p class="cap" id="nsCap">Taken from the quietest moments of the recording. For a better match, drag across a stretch with only noise, then learn from it.</p>
+        <div class="row">
+          <button class="btn small" id="learn" disabled>Learn from selection</button>
+          <button class="btn small" id="auto" disabled>Use auto</button>
+        </div>
+      </div>
+      <div class="group">
+        <label class="switch"><input type="checkbox" id="hum" checked><span class="t"><b>Remove mains hum</b><span class="cap" id="humCap">Finds 50 or 60 Hz hum and its harmonics.</span></span></label>
+        <label class="switch"><input type="checkbox" id="hp" checked><span class="t"><b>Cut rumble below 80 Hz</b><span class="cap">Removes desk thumps, traffic and handling noise.</span></span></label>
+        <label class="switch"><input type="checkbox" id="norm"><span class="t"><b>Raise peak to −1 dB</b><span class="cap">Makes the cleaned file louder. Leave off for a fair A/B.</span></span></label>
+      </div>
+      <div class="group">
+        <dl class="readout">
+          <dt>Noise floor before</dt><dd id="fIn">—</dd>
+          <dt>Noise floor after</dt><dd id="fOut">—</dd>
+          <dt>Noise removed</dt><dd class="big" id="fRed">—</dd>
+        </dl>
+      </div>
+      <div class="group">
+        <button class="btn primary" id="dl" disabled>Download cleaned audio</button>
+        <p class="dlnote" id="dlNote">Saves a .zip holding a lossless 24-bit WAV at the original sample rate.</p>
+      </div>
+    </aside>
+  </main>
+
+  <p class="foot">How it works: the audio is split into overlapping 43 ms frames. A noise profile is measured, then each frequency bin gets a gain from a log-spectral amplitude estimator with speech-presence detection, which keeps voice detail while avoiding the warbling “musical noise” of simple gates. Hum is cut with narrow notch filters, and stereo images are kept intact. Works best on speech. Music with sustained notes can lose some tone at high settings.</p>
+</div>
+<div class="drop" id="drop" hidden>Drop to clean this file</div>
+
+<script type="text/plain" id="dsp-src">
+"use strict";
+const TWO_PI = Math.PI * 2;
+const fftCache = {};
+function makeFFT(N) {
+  if (fftCache[N]) return fftCache[N];
+  const levels = Math.round(Math.log2(N));
+  const rev = new Uint32Array(N);
+  for (let i = 0; i < N; i++) { let r = 0, x = i; for (let j = 0; j < levels; j++) { r = (r << 1) | (x & 1); x >>= 1; } rev[i] = r; }
+  const cs = new Float64Array(N / 2), sn = new Float64Array(N / 2);
+  for (let i = 0; i < N / 2; i++) { cs[i] = Math.cos(TWO_PI * i / N); sn[i] = Math.sin(TWO_PI * i / N); }
+  function fft(re, im, inverse) {
+    for (let i = 0; i < N; i++) { const j = rev[i]; if (j > i) { let t = re[i]; re[i] = re[j]; re[j] = t; t = im[i]; im[i] = im[j]; im[j] = t; } }
+    for (let size = 2; size <= N; size <<= 1) {
+      const half = size >> 1, step = N / size;
+      for (let i = 0; i < N; i += size) {
+        for (let j = 0, k = 0; j < half; j++, k += step) {
+          const a = i + j, b = a + half;
+          const wr = cs[k], wi = inverse ? sn[k] : -sn[k];
+          const tr = re[b] * wr - im[b] * wi, ti = re[b] * wi + im[b] * wr;
+          re[b] = re[a] - tr; im[b] = im[a] - ti; re[a] += tr; im[a] += ti;
+        }
+      }
+    }
+  }
+  return (fftCache[N] = fft);
+}
+
+function biquad(x, c) {
+  const b0 = c[0], b1 = c[1], b2 = c[2], a1 = c[3], a2 = c[4];
+  let x1 = 0, x2 = 0, y1 = 0, y2 = 0;
+  for (let n = 0; n < x.length; n++) { const xn = x[n]; const y = b0 * xn + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2; x2 = x1; x1 = xn; y2 = y1; y1 = y; x[n] = y; }
+}
+function filtfilt(x, c) { biquad(x, c); x.reverse(); biquad(x, c); x.reverse(); }
+function hpCoef(f, sr, Q) {
+  const w = TWO_PI * f / sr, cw = Math.cos(w), al = Math.sin(w) / (2 * Q), a0 = 1 + al;
+  return [(1 + cw) / 2 / a0, -(1 + cw) / a0, (1 + cw) / 2 / a0, -2 * cw / a0, (1 - al) / a0];
+}
+function notchCoef(f, sr, Q) {
+  const w = TWO_PI * f / sr, cw = Math.cos(w), al = Math.sin(w) / (2 * Q), a0 = 1 + al;
+  return [1 / a0, -2 * cw / a0, 1 / a0, -2 * cw / a0, (1 - al) / a0];
+}
+function mix(chs) {
+  const L = chs[0].length, m = new Float32Array(L);
+  for (const ch of chs) for (let i = 0; i < L; i++) m[i] += ch[i];
+  if (chs.length > 1) for (let i = 0; i < L; i++) m[i] /= chs.length;
+  return m;
+}
+
+// Exponential integral E1, used by the log-spectral amplitude gain.
+function E1(x) {
+  if (x <= 1) {
+    let s = 0, t = 1;
+    for (let k = 1; k < 80; k++) { t *= -x / k; const d = t / k; s += d; if (Math.abs(d) < 1e-16 * Math.abs(s)) break; }
+    return -0.5772156649015329 - Math.log(x) - s;
+  }
+  let b = x + 1, c = 1e300, d = 1 / b, h = d;
+  for (let i = 1; i < 300; i++) { const an = -i * i; b += 2; d = 1 / (an * d + b); c = b + an / c; const del = c * d; h *= del; if (Math.abs(del - 1) < 1e-15) break; }
+  return h * Math.exp(-x);
+}
+const E1N = 4096, E1lo = Math.log(1e-6), E1hi = Math.log(60), E1T = new Float64Array(E1N);
+for (let i = 0; i < E1N; i++) E1T[i] = Math.exp(0.5 * E1(Math.exp(E1lo + (E1hi - E1lo) * i / (E1N - 1))));
+function expHalfE1(v) {
+  if (v >= 60) return 1;
+  if (v <= 1e-6) return Math.exp(0.5 * (-0.5772156649015329 - Math.log(Math.max(v, 1e-300))));
+  const x = (Math.log(v) - E1lo) / (E1hi - E1lo) * (E1N - 1), i = x | 0, fr = x - i;
+  return i >= E1N - 1 ? E1T[E1N - 1] : E1T[i] * (1 - fr) + E1T[i + 1] * fr;
+}
+
+// Mains hum detection with windowed Goertzel over 4 s chunks (0.25 Hz resolution).
+function detectHum(x, sr) {
+  if (x.length < sr) return null;
+  const len = Math.min(x.length, Math.round(4 * sr));
+  const win = new Float32Array(len);
+  for (let n = 0; n < len; n++) win[n] = 0.5 - 0.5 * Math.cos(TWO_PI * n / len);
+  const nCh = Math.max(1, Math.min(5, Math.floor(x.length / len)));
+  const starts = [];
+  for (let i = 0; i < nCh; i++) starts.push(nCh === 1 ? 0 : Math.round(i * (x.length - len) / (nCh - 1)));
+  const cache = new Map();
+  function power(f) {
+    const key = f.toFixed(3); if (cache.has(key)) return cache.get(key);
+    const c = 2 * Math.cos(TWO_PI * f / sr); let tot = 0;
+    for (const s0 of starts) {
+      let s1 = 0, s2 = 0;
+      for (let n = 0; n < len; n++) { const s = x[s0 + n] * win[n] + c * s1 - s2; s2 = s1; s1 = s; }
+      tot += s1 * s1 + s2 * s2 - c * s1 * s2;
+    }
+    cache.set(key, tot); return tot;
+  }
+  const ratio = f => 10 * Math.log10((power(f) + 1e-30) / ((power(f - 4) + power(f + 4)) / 2 + 1e-30));
+  const nyq = sr / 2 - 20;
+  function score(f0) { let s = 0, n = 0; for (let h = 1; h <= 8 && h * f0 < nyq; h++) { s += Math.max(-10, Math.min(40, ratio(h * f0))); n++; } return s / n; }
+  const s50 = score(50), s60 = score(60);
+  const f0 = s50 >= s60 ? 50 : 60, best = Math.max(s50, s60);
+  if (best < 4) return { f0: null, harmonics: [] };
+  const harmonics = [];
+  for (let h = 1; h <= 24 && h * f0 < Math.min(2400, nyq); h++) if (ratio(h * f0) > 6) harmonics.push(h);
+  if (!harmonics.length) return { f0: null, harmonics: [] };
+  return { f0, harmonics };
+}
+
+self.onmessage = e => {
+  try { run(e.data); }
+  catch (err) { postMessage({ type: "error", message: String((err && err.message) || err) }); }
+};
+
+function run({ channels, sr, opts, cols, rows }) {
+  const C = channels.length, L = channels[0].length;
+  const prog = p => postMessage({ type: "progress", p });
+  const rawMono = mix(channels);
+
+  // Pre-filters: rumble cut (or DC block), then hum notches. Zero-phase.
+  const hp = hpCoef(opts.highpass ? 80 : 20, sr, Math.SQRT1_2);
+  for (const ch of channels) filtfilt(ch, hp);
+  let mono = mix(channels);
+  prog(0.04);
+  const hum = detectHum(mono, sr);
+  let humApplied = false;
+  if (opts.hum && hum && hum.f0) {
+    for (const h of hum.harmonics) { const f = h * hum.f0; const co = notchCoef(f, sr, f / 2.5); for (const ch of channels) filtfilt(ch, co); }
+    humApplied = true; mono = mix(channels);
+  }
+  prog(0.1);
+
+  // STFT setup: sqrt-Hann analysis and synthesis, 75% overlap.
+  const N = sr >= 32000 ? 2048 : (sr >= 16000 ? 1024 : 512), hop = N >> 2, K = (N >> 1) + 1;
+  const w = new Float64Array(N), hann = new Float64Array(N);
+  let sumw = 0, hs2 = 0;
+  for (let n = 0; n < N; n++) { hann[n] = 0.5 - 0.5 * Math.cos(TWO_PI * n / N); w[n] = Math.sqrt(hann[n]); sumw += w[n]; hs2 += hann[n] * hann[n]; }
+  let ola = 0; for (let n = 0; n < N; n += hop) ola += w[n] * w[n];
+  const norm = 1 / ola;
+  const pad = N, total = L + 2 * N, F = Math.floor((total - N) / hop) + 1;
+  const fft = makeFFT(N);
+  const pairs = Math.ceil(C / 2);
+  const RE = [], IM = [];
+  for (let p = 0; p < pairs; p++) { RE.push(new Float64Array(N)); IM.push(new Float64Array(N)); }
+  const P = new Float64Array(K);
+
+  function analyze(f) {
+    const start = f * hop - pad;
+    P.fill(0);
+    for (let p = 0; p < pairs; p++) {
+      const a = channels[2 * p], b = channels[2 * p + 1], re = RE[p], im = IM[p];
+      for (let n = 0; n < N; n++) {
+        const i = start + n, ok = i >= 0 && i < L;
+        re[n] = ok ? a[i] * w[n] : 0;
+        im[n] = ok && b ? b[i] * w[n] : 0;
+      }
+      fft(re, im, false);
+      for (let k = 0; k < K; k++) {
+        const m = (N - k) % N;
+        const xr = (re[k] + re[m]) / 2, xi = (im[k] - im[m]) / 2;
+        const yr = (im[k] + im[m]) / 2, yi = (re[k] - re[m]) / 2;
+        P[k] += xr * xr + xi * xi + yr * yr + yi * yi;
+      }
+    }
+    for (let k = 0; k < K; k++) P[k] /= C;
+  }
+  function frameEnergy(sig, f) {
+    const start = f * hop - pad; let e = 0;
+    for (let n = 0; n < N; n++) { const i = start + n; if (i >= 0 && i < L) { const v = sig[i] * hann[n]; e += v * v; } }
+    return e;
+  }
+
+  // Pick noise-only frames: a user selection, or the quietest 10%.
+  const valid = [];
+  for (let f = 0; f < F; f++) { const s = f * hop - pad; if (s >= 0 && s + N <= L) valid.push(f); }
+  if (!valid.length) for (let f = 0; f < F; f++) valid.push(f);
+  let quiet = [], source = "auto";
+  if (opts.noiseRegion) {
+    const a = opts.noiseRegion[0] * sr, b = opts.noiseRegion[1] * sr;
+    for (const f of valid) { const c = f * hop - pad + N / 2; if (c >= a && c <= b) quiet.push(f); }
+    if (quiet.length >= 3) source = "selection"; else quiet = [];
+  }
+  if (!quiet.length) {
+    const E = valid.map(f => [f, frameEnergy(mono, f)]);
+    let pool = E.filter(x => x[1] > 1e-12 * N);
+    if (!pool.length) pool = E;
+    pool.sort((x, y) => x[1] - y[1]);
+    const n = Math.min(pool.length, Math.max(8, Math.round(pool.length * 0.1)));
+    quiet = pool.slice(0, n).map(x => x[0]);
+  }
+  const profile = new Float64Array(K);
+  for (const f of quiet) { analyze(f); for (let k = 0; k < K; k++) profile[k] += P[k]; }
+  for (let k = 0; k < K; k++) profile[k] = Math.max(profile[k] / quiet.length, 1e-20);
+  prog(0.14);
+
+  // Spectrogram mapping (log-frequency rows, top = high).
+  const fmin = 40, fmax = Math.min(16000, sr / 2 * 0.98);
+  const rLo = new Int32Array(rows), rHi = new Int32Array(rows);
+  for (let r = 0; r < rows; r++) {
+    const fTop = fmax * Math.pow(fmin / fmax, r / rows), fBot = fmax * Math.pow(fmin / fmax, (r + 1) / rows);
+    const lo = Math.min(K - 1, Math.floor(fBot * N / sr)), hi = Math.min(K - 1, Math.max(lo, Math.floor(fTop * N / sr)));
+    rLo[r] = lo; rHi[r] = hi;
+  }
+  const specIn = new Float32Array(cols * rows), specOut = new Float32Array(cols * rows);
+
+  // Estimator state.
+  const Gmin = Math.pow(10, -opts.reduction / 20), lnGmin = Math.log(Gmin);
+  const overs = 1 + 0.5 * Math.min(1, Math.max(0, (opts.reduction - 6) / 34));
+  const xiMin = Math.pow(10, -2.5), aDD = 0.98;
+  const changing = opts.mode === "changing";
+  const lam = Float64Array.from(profile), Ss = Float64Array.from(profile), Smin = Float64Array.from(profile), Stmp = Float64Array.from(profile);
+  const pS = new Float64Array(K), Sf = new Float64Array(K);
+  const Gprev = new Float64Array(K).fill(1), gPrev = new Float64Array(K).fill(1), zeta = new Float64Array(K).fill(xiMin);
+  const xi = new Float64Array(K), gam = new Float64Array(K), G = new Float64Array(K), pk = new Float64Array(K), Gf = new Float64Array(K), cz = new Float64Array(K + 1);
+  const Lw = Math.max(20, Math.round(1.0 * sr / hop)); let cnt = 0;
+  const kF0 = Math.max(1, Math.round(100 * N / sr)), kF1 = Math.min(K - 1, Math.round(4000 * N / sr));
+  const Pz = z => z <= 0.1 ? 0 : z >= 0.31623 ? 1 : Math.log10(z / 0.1) / 0.5;
+  const out = channels.map(() => new Float32Array(total));
+  const tick = Math.max(64, Math.floor(F / 60));
+
+  for (let f = 0; f < F; f++) {
+    analyze(f);
+    if (changing) {
+      for (let k = 0; k < K; k++) Sf[k] = 0.25 * P[k > 0 ? k - 1 : k] + 0.5 * P[k] + 0.25 * P[k < K - 1 ? k + 1 : k];
+      for (let k = 0; k < K; k++) { Ss[k] = 0.8 * Ss[k] + 0.2 * Sf[k]; if (Ss[k] < Smin[k]) Smin[k] = Ss[k]; if (Ss[k] < Stmp[k]) Stmp[k] = Ss[k]; }
+      if (++cnt >= Lw) { cnt = 0; for (let k = 0; k < K; k++) { Smin[k] = Math.min(Stmp[k], Ss[k]); Stmp[k] = Ss[k]; } }
+      for (let k = 0; k < K; k++) {
+        pS[k] = 0.2 * pS[k] + 0.8 * (Ss[k] > 5 * Smin[k] ? 1 : 0);
+        const ad = 0.95 + 0.05 * pS[k];
+        lam[k] = ad * lam[k] + (1 - ad) * P[k];
+      }
+    }
+    for (let k = 0; k < K; k++) {
+      const nz = Math.max((changing ? lam[k] * 1.15 : profile[k]) * overs, 1e-20);
+      const g = Math.min(P[k] / nz, 1e4);
+      let x = aDD * Gprev[k] * Gprev[k] * gPrev[k] + (1 - aDD) * Math.max(g - 1, 0);
+      if (x < xiMin) x = xiMin;
+      gam[k] = g; xi[k] = x;
+      zeta[k] = 0.7 * zeta[k] + 0.3 * x;
+    }
+    cz[0] = 0; for (let k = 0; k < K; k++) cz[k + 1] = cz[k] + zeta[k];
+    let zf = 0; for (let k = kF0; k <= kF1; k++) zf += zeta[k]; zf /= (kF1 - kF0 + 1);
+    const Pframe = Pz(zf);
+    for (let k = 0; k < K; k++) {
+      const l0 = Math.max(0, k - 1), l1 = Math.min(K - 1, k + 1), g0 = Math.max(0, k - 15), g1 = Math.min(K - 1, k + 15);
+      const zl = (cz[l1 + 1] - cz[l0]) / (l1 - l0 + 1), zg = (cz[g1 + 1] - cz[g0]) / (g1 - g0 + 1);
+      let q = 1 - Pz(zl) * Pz(zg) * Pframe;
+      if (q > 0.95) q = 0.95; if (q < 0) q = 0;
+      const x = xi[k], g = gam[k], v = x * g / (1 + x);
+      const GH1 = Math.min(1, x / (1 + x) * expHalfE1(v));
+      const p = q <= 1e-6 ? 1 : 1 / (1 + q / (1 - q) * (1 + x) * Math.exp(-v));
+      G[k] = Math.exp(p * Math.log(Math.max(GH1, 1e-12)) + (1 - p) * lnGmin);
+      pk[k] = p; Gprev[k] = GH1; gPrev[k] = g;
+    }
+    for (let k = 0; k < K; k++) {
+      const gs = (G[k > 0 ? k - 1 : k] + 2 * G[k] + G[k < K - 1 ? k + 1 : k]) / 4;
+      Gf[k] = Math.max(Gmin, pk[k] * G[k] + (1 - pk[k]) * gs);
+    }
+    // Apply the same real gain to every channel pair (keeps stereo image), then overlap-add.
+    const start = f * hop, sc = norm / N;
+    for (let p = 0; p < pairs; p++) {
+      const re = RE[p], im = IM[p];
+      for (let k = 0; k < N; k++) { const g = Gf[k <= N / 2 ? k : N - k]; re[k] *= g; im[k] *= g; }
+      fft(re, im, true);
+      const oa = out[2 * p], ob = out[2 * p + 1];
+      for (let n = 0; n < N; n++) { oa[start + n] += re[n] * w[n] * sc; if (ob) ob[start + n] += im[n] * w[n] * sc; }
+    }
+    // Spectrogram columns.
+    const center = f * hop - pad + N / 2;
+    if (center >= 0 && center < L) {
+      const col = Math.min(cols - 1, Math.floor(center / L * cols));
+      for (let r = 0; r < rows; r++) {
+        let mi = 0, mo = 0;
+        for (let k = rLo[r]; k <= rHi[r]; k++) { if (P[k] > mi) mi = P[k]; const o = P[k] * Gf[k] * Gf[k]; if (o > mo) mo = o; }
+        const idx = r * cols + col;
+        if (mi > specIn[idx]) specIn[idx] = mi;
+        if (mo > specOut[idx]) specOut[idx] = mo;
+      }
+    }
+    if (f % tick === 0) prog(0.14 + 0.82 * f / F);
+  }
+
+  const res = out.map(o => o.slice(pad, pad + L));
+  if (opts.normalize) {
+    let pk2 = 0; for (const ch of res) for (let i = 0; i < L; i++) { const a = Math.abs(ch[i]); if (a > pk2) pk2 = a; }
+    if (pk2 > 1e-6) { const g = Math.pow(10, -1 / 20) / pk2; for (const ch of res) for (let i = 0; i < L; i++) ch[i] *= g; }
+  } else {
+    for (const ch of res) for (let i = 0; i < L; i++) { const v = ch[i]; if (v > 1) ch[i] = 1; else if (v < -1) ch[i] = -1; }
+  }
+  const outMono = mix(res);
+  let eIn = 0, eOut = 0;
+  for (const f of quiet) { eIn += frameEnergy(rawMono, f); eOut += frameEnergy(outMono, f); }
+  const dB = e => 10 * Math.log10(e / quiet.length / hs2 + 1e-14);
+
+  // Spectrogram bytes.
+  const ref = (sumw / 2) * (sumw / 2), lo = -108, hi = -18;
+  const toBytes = s => { const b = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) { const v = 10 * Math.log10(s[i] / ref + 1e-20); b[i] = Math.max(0, Math.min(255, Math.round((v - lo) / (hi - lo) * 255))); } return b; };
+  const bIn = toBytes(specIn), bOut = toBytes(specOut);
+  prog(1);
+  postMessage({ type: "done", out: res, specIn: bIn, specOut: bOut, cols, rows, fmin, fmax,
+    stats: { floorIn: dB(eIn), floorOut: dB(eOut), hum, humApplied, source } },
+    [...res.map(r => r.buffer), bIn.buffer, bOut.buffer]);
+}
+</script>
+
+<script>
+(() => {
+"use strict";
+const $ = s => document.getElementById(s);
+const COLS = 1200, ROWS = 200;
+const workerURL = URL.createObjectURL(new Blob([$("dsp-src").textContent], { type: "text/javascript" }));
+
+const S = {
+  name: "", isDemo: false, orig: null, clean: null, sel: null, noiseRegion: null, listen: "clean",
+  opts: { reduction: 20, mode: "steady", hum: true, highpass: true, normalize: false },
+  worker: null, job: 0, playing: false, cursor: 0, startTime: 0, startOffset: 0, loop: null, srcs: null, last: null
+};
+
+let ac = null, gO = null, gC = null;
+function ctx() {
+  if (!ac) {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    ac = new AC();
+    gO = ac.createGain(); gC = ac.createGain();
+    gO.connect(ac.destination); gC.connect(ac.destination);
+  }
+  return ac;
+}
+
+/* ---------- colormap ---------- */
+const LUT = (() => {
+  const stops = [[0, [8, 12, 26]], [0.28, [26, 38, 92]], [0.5, [34, 104, 150]], [0.68, [52, 168, 150]], [0.84, [236, 196, 86]], [1, [255, 248, 226]]];
+  const lut = new Uint8ClampedArray(256 * 3);
+  for (let i = 0; i < 256; i++) {
+    const t = i / 255; let j = 0; while (j < stops.length - 2 && t > stops[j + 1][0]) j++;
+    const [t0, c0] = stops[j], [t1, c1] = stops[j + 1], u = Math.min(1, Math.max(0, (t - t0) / (t1 - t0)));
+    for (let k = 0; k < 3; k++) lut[i * 3 + k] = c0[k] + (c1[k] - c0[k]) * u;
+  }
+  return lut;
+})();
+function drawSpec(canvas, bytes, cols, rows) {
+  canvas.width = cols; canvas.height = rows;
+  const c2 = canvas.getContext("2d"), img = c2.createImageData(cols, rows), d = img.data;
+  for (let i = 0; i < bytes.length; i++) { const v = bytes[i] * 3; d[i * 4] = LUT[v]; d[i * 4 + 1] = LUT[v + 1]; d[i * 4 + 2] = LUT[v + 2]; d[i * 4 + 3] = 255; }
+  c2.putImageData(img, 0, 0);
+}
+function drawTicks(fmin, fmax) {
+  const marks = [[100, "100"], [300, "300"], [1000, "1k"], [3000, "3k"], [10000, "10k"]];
+  for (const id of ["tIn", "tOut"]) {
+    const el = $(id); el.textContent = "";
+    for (const [f, lab] of marks) {
+      if (f < fmin || f > fmax) continue;
+      const s = document.createElement("span"); s.className = "ftick";
+      s.style.top = (Math.log(fmax / f) / Math.log(fmax / fmin) * 100) + "%"; s.textContent = lab; el.appendChild(s);
+    }
+  }
+}
+
+/* ---------- formatting ---------- */
+const fmt = t => { t = Math.max(0, t); const m = Math.floor(t / 60), s = t - m * 60; return m + ":" + (s < 10 ? "0" : "") + s.toFixed(1); };
+const fmtShort = t => { const m = Math.floor(t / 60), s = Math.round(t - m * 60); return m + ":" + (s < 10 ? "0" : "") + s; };
+function setStatus(kind, text) { const el = $("status"); el.className = "status" + (kind === "ok" ? " ok" : kind === "err" ? " err" : ""); el.textContent = text; }
+
+/* ---------- processing ---------- */
+let debounce = 0;
+function schedule() { clearTimeout(debounce); debounce = setTimeout(runJob, 120); }
+function runJob() {
+  if (!S.orig) return;
+  if (S.worker) S.worker.terminate();
+  const w = new Worker(workerURL); S.worker = w; const id = ++S.job;
+  setStatus("busy", "Cleaning 0%"); $("veil").hidden = false;
+  const chans = []; for (let c = 0; c < S.orig.numberOfChannels; c++) chans.push(S.orig.getChannelData(c).slice());
+  w.onmessage = e => {
+    if (id !== S.job) return;
+    const m = e.data;
+    if (m.type === "progress") { setStatus("busy", "Cleaning " + Math.round(m.p * 100) + "%"); $("veil").textContent = "Cleaning " + Math.round(m.p * 100) + "%"; }
+    else if (m.type === "done") { w.terminate(); S.worker = null; applyResult(m); }
+    else if (m.type === "error") { w.terminate(); S.worker = null; $("veil").hidden = true; setStatus("err", "Processing failed: " + m.message); }
+  };
+  w.onerror = ev => { if (id === S.job) { $("veil").hidden = true; setStatus("err", "Processing failed. Try a shorter file."); } };
+  w.postMessage({ channels: chans, sr: S.orig.sampleRate, opts: { ...S.opts, noiseRegion: S.noiseRegion }, cols: COLS, rows: ROWS }, chans.map(c => c.buffer));
+}
+function applyResult(m) {
+  const c = ctx(), o = S.orig;
+  const buf = c.createBuffer(o.numberOfChannels, o.length, o.sampleRate);
+  m.out.forEach((ch, i) => buf.copyToChannel(ch, i));
+  S.clean = buf; S.last = m;
+  drawSpec($("cvIn"), m.specIn, m.cols, m.rows);
+  drawSpec($("cvOut"), m.specOut, m.cols, m.rows);
+  drawTicks(m.fmin, m.fmax);
+  $("veil").hidden = true;
+  const st = m.stats;
+  $("fIn").textContent = st.floorIn.toFixed(1) + " dBFS";
+  $("fOut").textContent = st.floorOut.toFixed(1) + " dBFS";
+  $("fRed").textContent = Math.max(0, st.floorIn - st.floorOut).toFixed(1) + " dB";
+  const h = st.hum;
+  $("humCap").textContent = h && h.f0
+    ? `Found ${h.f0} Hz hum with ${h.harmonics.length} harmonic${h.harmonics.length > 1 ? "s" : ""}. ${st.humApplied ? "Notched out." : "Turn on to remove it."}`
+    : "No mains hum found in this recording.";
+  setStatus("ok", "Ready");
+  $("dl").disabled = !dl; $("play").disabled = false;
+  if (S.playing) play(pos());
+}
+
+/* ---------- file loading ---------- */
+async function loadFile(file) {
+  if (!file) return;
+  stop(); setStatus("busy", "Reading file");
+  let ab;
+  try {
+    const data = await file.arrayBuffer();
+    ab = await new Promise((res, rej) => { const p = ctx().decodeAudioData(data, res, rej); if (p && p.catch) p.catch(rej); });
+  } catch (e) {
+    setStatus("err", "Couldn't read audio from that file. Try WAV, MP3, M4A, FLAC, OGG or MP4."); return;
+  }
+  if (ab.duration > 30 * 60) { setStatus("err", "That file is over 30 minutes. Trim it into shorter parts first."); return; }
+  S.orig = ab; S.clean = null; S.name = file.name; S.isDemo = false; S.sel = null; S.noiseRegion = null; S.cursor = 0;
+  updateFile(); updateNoiseUI(); renderOverlay(); runJob();
+}
+function updateFile() {
+  const o = S.orig;
+  $("fname").textContent = S.name; $("demotag").hidden = !S.isDemo;
+  const ch = o.numberOfChannels === 1 ? "mono" : o.numberOfChannels === 2 ? "stereo" : o.numberOfChannels + " channels";
+  $("fmeta").textContent = `${fmt(o.duration)} · ${(o.sampleRate / 1000).toFixed(1).replace(/\.0$/, "")} kHz · ${ch}`;
+  const ax = $("taxis").children; ax[0].textContent = "0:00"; ax[1].textContent = fmtShort(o.duration / 2); ax[2].textContent = fmtShort(o.duration);
+  updateClock();
+}
+$("file").addEventListener("change", e => { loadFile(e.target.files[0]); e.target.value = ""; });
+let dragDepth = 0;
+window.addEventListener("dragenter", e => { if (e.dataTransfer && [...e.dataTransfer.types].includes("Files")) { e.preventDefault(); dragDepth++; $("drop").hidden = false; } });
+window.addEventListener("dragleave", () => { dragDepth = Math.max(0, dragDepth - 1); if (!dragDepth) $("drop").hidden = true; });
+window.addEventListener("dragover", e => e.preventDefault());
+window.addEventListener("drop", e => { e.preventDefault(); dragDepth = 0; $("drop").hidden = true; const f = e.dataTransfer.files && e.dataTransfer.files[0]; if (f) loadFile(f); });
+
+/* ---------- playback ---------- */
+function setGains(now) {
+  if (!ac) return;
+  const useClean = S.listen === "clean" && S.clean;
+  const t = ac.currentTime;
+  gO.gain.cancelScheduledValues(t); gC.gain.cancelScheduledValues(t);
+  if (now) { gO.gain.setValueAtTime(useClean ? 0 : 1, t); gC.gain.setValueAtTime(useClean ? 1 : 0, t); }
+  else { gO.gain.setTargetAtTime(useClean ? 0 : 1, t, 0.012); gC.gain.setTargetAtTime(useClean ? 1 : 0, t, 0.012); }
+}
+function stopSources() { if (S.srcs) for (const s of S.srcs) { try { s.stop(); } catch (e) {} s.disconnect(); } S.srcs = null; }
+function play(from) {
+  if (!S.orig) return;
+  const c = ctx(); stopSources(); c.resume();
+  const dur = S.orig.duration;
+  S.loop = S.sel && S.sel.b - S.sel.a > 0.05 ? { a: S.sel.a, b: S.sel.b } : null;
+  let at = from == null ? S.cursor : from;
+  if (S.loop && (at < S.loop.a || at >= S.loop.b)) at = S.loop.a;
+  if (!S.loop && at >= dur - 0.02) at = 0;
+  const mk = (buf, g) => { const s = c.createBufferSource(); s.buffer = buf; if (S.loop) { s.loop = true; s.loopStart = S.loop.a; s.loopEnd = S.loop.b; } s.connect(g); return s; };
+  const t = c.currentTime + 0.03;
+  S.srcs = [mk(S.orig, gO)]; if (S.clean) S.srcs.push(mk(S.clean, gC));
+  S.srcs.forEach(s => s.start(t, at));
+  setGains(true);
+  S.startTime = t; S.startOffset = at; S.playing = true; setPlayIcon();
+  requestAnimationFrame(frame);
+}
+function stop() { if (S.playing) S.cursor = pos(); stopSources(); S.playing = false; setPlayIcon(); }
+function pos() {
+  if (!S.playing || !ac) return S.cursor;
+  let p = S.startOffset + Math.max(0, ac.currentTime - S.startTime);
+  if (S.loop && p >= S.loop.b) p = S.loop.a + ((p - S.loop.a) % (S.loop.b - S.loop.a));
+  return p;
+}
+function frame() {
+  if (!S.playing) return;
+  const p = pos();
+  if (!S.loop && p >= S.orig.duration) { stopSources(); S.playing = false; S.cursor = 0; setPlayIcon(); renderHead(); updateClock(); return; }
+  renderHead(); updateClock(); requestAnimationFrame(frame);
+}
+function setPlayIcon() { $("icoPlay").hidden = S.playing; $("icoPause").hidden = !S.playing; $("play").setAttribute("aria-label", S.playing ? "Pause" : "Play"); }
+function renderHead() { if (!S.orig) return; $("head").style.left = (pos() / S.orig.duration * 100) + "%"; }
+function updateClock() { if (S.orig) $("clock").textContent = fmt(pos()) + " / " + fmt(S.orig.duration); }
+$("play").addEventListener("click", () => S.playing ? stop() : play());
+function setListen(v) { S.listen = v; $("lOrig").setAttribute("aria-pressed", v === "orig"); $("lClean").setAttribute("aria-pressed", v === "clean"); setGains(false); }
+$("lOrig").addEventListener("click", () => setListen("orig"));
+$("lClean").addEventListener("click", () => setListen("clean"));
+document.addEventListener("keydown", e => {
+  const tag = (e.target.tagName || "").toLowerCase();
+  if (e.code === "Space" && tag !== "input" && tag !== "button" && !e.target.isContentEditable) { e.preventDefault(); if (S.orig) S.playing ? stop() : play(); }
+});
+
+/* ---------- selection on the spectrograms ---------- */
+const stage = $("stage");
+let drag = null;
+const xToT = x => { const r = stage.getBoundingClientRect(); return Math.min(1, Math.max(0, (x - r.left) / r.width)) * (S.orig ? S.orig.duration : 0); };
+stage.addEventListener("pointerdown", e => {
+  if (!S.orig || e.button > 0) return;
+  drag = { x0: e.clientX, t0: xToT(e.clientX), moved: false, id: e.pointerId };
+  stage.setPointerCapture(e.pointerId);
+});
+stage.addEventListener("pointermove", e => {
+  if (!drag) return;
+  if (!drag.moved && Math.abs(e.clientX - drag.x0) > 5) drag.moved = true;
+  if (drag.moved) { const t = xToT(e.clientX); S.sel = { a: Math.min(drag.t0, t), b: Math.max(drag.t0, t) }; renderOverlay(); }
+});
+function endDrag(e) {
+  if (!drag) return;
+  const d = drag; drag = null;
+  if (!d.moved) { S.sel = null; renderOverlay(); S.cursor = d.t0; if (S.playing) play(d.t0); else { renderHead(); updateClock(); } }
+  else { updateNoiseUI(); if (S.playing) play(S.sel.a); else { S.cursor = S.sel.a; renderHead(); updateClock(); } }
+  updateNoiseUI();
+}
+stage.addEventListener("pointerup", endDrag);
+stage.addEventListener("pointercancel", () => { drag = null; });
+function renderOverlay() {
+  const el = $("sel");
+  if (!S.sel || !S.orig) { el.hidden = true; return; }
+  el.hidden = false; const d = S.orig.duration;
+  el.style.left = (S.sel.a / d * 100) + "%"; el.style.width = ((S.sel.b - S.sel.a) / d * 100) + "%";
+}
+
+/* ---------- controls ---------- */
+$("red").addEventListener("input", e => { $("redVal").textContent = e.target.value + " dB"; });
+$("red").addEventListener("change", e => { S.opts.reduction = +e.target.value; schedule(); });
+function setMode(m) {
+  S.opts.mode = m; $("mSteady").setAttribute("aria-pressed", m === "steady"); $("mChanging").setAttribute("aria-pressed", m === "changing");
+  $("modeCap").textContent = m === "steady" ? "Steady suits fans, AC, hiss and computer hum. It gives the cleanest result." : "Changing follows noise that rises and falls, like traffic, crowds or a café. Expect slightly less clean pauses.";
+  schedule();
+}
+$("mSteady").addEventListener("click", () => setMode("steady"));
+$("mChanging").addEventListener("click", () => setMode("changing"));
+$("hum").addEventListener("change", e => { S.opts.hum = e.target.checked; schedule(); });
+$("hp").addEventListener("change", e => { S.opts.highpass = e.target.checked; schedule(); });
+$("norm").addEventListener("change", e => { S.opts.normalize = e.target.checked; schedule(); });
+function updateNoiseUI() {
+  const hasSel = !!(S.sel && S.sel.b - S.sel.a >= 0.15);
+  $("learn").disabled = !hasSel;
+  $("auto").disabled = !S.noiseRegion;
+  if (S.noiseRegion) {
+    $("nsVal").textContent = fmt(S.noiseRegion[0]) + "–" + fmt(S.noiseRegion[1]);
+    $("nsCap").textContent = "Using the stretch you picked as the noise reference. Pick a part with no voice for the best result.";
+  } else {
+    $("nsVal").textContent = "Auto";
+    $("nsCap").textContent = "Taken from the quietest moments of the recording. For a better match, drag across a stretch with only noise, then learn from it.";
+  }
+}
+$("learn").addEventListener("click", () => { if (!S.sel) return; S.noiseRegion = [S.sel.a, S.sel.b]; updateNoiseUI(); runJob(); });
+$("auto").addEventListener("click", () => { S.noiseRegion = null; updateNoiseUI(); runJob(); });
+
+/* ---------- download: 24-bit WAV inside a stored ZIP ---------- */
+let dl = null;
+const native = window.HushNative || null;
+if (native) {
+  dl = { native: true };
+  $("dl").textContent = "Save cleaned WAV";
+  $("dlNote").textContent = "Saves a lossless 24-bit WAV to Downloads/Hush on this phone.";
+} else (async () => {
+  try { dl = window.claude && window.claude.use ? await window.claude.use("downloads") : null; } catch (e) { dl = null; }
+  if (!dl) { $("dl").disabled = true; $("dlNote").textContent = "Saving files isn't available in this view. Open the page in claude.ai to download."; }
+  else if (S.clean) $("dl").disabled = false;
+})();
+async function saveNative(name, bytes) {
+  const err0 = native.begin(name); if (err0) throw new Error(err0);
+  const CH = 786432;
+  try {
+    for (let o = 0; o < bytes.length; o += CH) {
+      const part = bytes.subarray(o, Math.min(bytes.length, o + CH));
+      let bin = ""; for (let i = 0; i < part.length; i += 32768) bin += String.fromCharCode.apply(null, part.subarray(i, i + 32768));
+      const err = native.write(btoa(bin)); if (err) throw new Error(err);
+      $("dlNote").textContent = "Saving " + Math.round(Math.min(1, (o + CH) / bytes.length) * 100) + "%";
+      await new Promise(r => setTimeout(r, 0));
+    }
+  } catch (e) { native.abort(); throw e; }
+  return native.finish();
+}
+function wav24(buf) {
+  const C = buf.numberOfChannels, L = buf.length, sr = buf.sampleRate, bytes = L * C * 3;
+  const out = new Uint8Array(44 + bytes), v = new DataView(out.buffer);
+  const str = (o, s) => { for (let i = 0; i < s.length; i++) out[o + i] = s.charCodeAt(i); };
+  str(0, "RIFF"); v.setUint32(4, 36 + bytes, true); str(8, "WAVE"); str(12, "fmt ");
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, C, true); v.setUint32(24, sr, true);
+  v.setUint32(28, sr * C * 3, true); v.setUint16(32, C * 3, true); v.setUint16(34, 24, true); str(36, "data"); v.setUint32(40, bytes, true);
+  const chs = []; for (let c = 0; c < C; c++) chs.push(buf.getChannelData(c));
+  let o = 44;
+  for (let i = 0; i < L; i++) for (let c = 0; c < C; c++) {
+    let s = Math.max(-1, Math.min(1, chs[c][i])); let x = Math.round(s * 8388607); if (x < 0) x += 16777216;
+    out[o++] = x & 255; out[o++] = (x >> 8) & 255; out[o++] = (x >> 16) & 255;
+  }
+  return out;
+}
+const CRC = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
+function crc32(d) { let c = 0xFFFFFFFF; for (let i = 0; i < d.length; i++) c = CRC[(c ^ d[i]) & 255] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; }
+function zipOne(name, data) {
+  const nm = new TextEncoder().encode(name), crc = crc32(data), sz = data.length;
+  const lh = new Uint8Array(30 + nm.length), lv = new DataView(lh.buffer);
+  lv.setUint32(0, 0x04034b50, true); lv.setUint16(4, 20, true); lv.setUint16(6, 0x0800, true); lv.setUint16(8, 0, true);
+  lv.setUint16(10, 0, true); lv.setUint16(12, 0x21, true); lv.setUint32(14, crc, true); lv.setUint32(18, sz, true); lv.setUint32(22, sz, true);
+  lv.setUint16(26, nm.length, true); lv.setUint16(28, 0, true); lh.set(nm, 30);
+  const cd = new Uint8Array(46 + nm.length), cv = new DataView(cd.buffer);
+  cv.setUint32(0, 0x02014b50, true); cv.setUint16(4, 20, true); cv.setUint16(6, 20, true); cv.setUint16(8, 0x0800, true); cv.setUint16(10, 0, true);
+  cv.setUint16(12, 0, true); cv.setUint16(14, 0x21, true); cv.setUint32(16, crc, true); cv.setUint32(20, sz, true); cv.setUint32(24, sz, true);
+  cv.setUint16(28, nm.length, true); cv.setUint32(42, 0, true); cd.set(nm, 46);
+  const end = new Uint8Array(22), ev = new DataView(end.buffer);
+  ev.setUint32(0, 0x06054b50, true); ev.setUint16(8, 1, true); ev.setUint16(10, 1, true);
+  ev.setUint32(12, cd.length, true); ev.setUint32(16, lh.length + sz, true);
+  return new Blob([lh, data, cd, end], { type: "application/zip" });
+}
+$("dl").addEventListener("click", async () => {
+  if (!dl || !S.clean) return;
+  const btn = $("dl"); btn.disabled = true; $("dlNote").textContent = "Preparing file…";
+  await new Promise(r => setTimeout(r, 30));
+  try {
+    const base = (S.name || "audio").replace(/\.[^.]+$/, "").replace(/[\\/:*?"<>|]+/g, "_") || "audio";
+    if (dl.native) {
+      const where = await saveNative(base + "-clean.wav", wav24(S.clean));
+      if (where && where.startsWith("ERR:")) throw new Error(where.slice(4));
+      $("dlNote").textContent = "Saved to " + where + ".";
+      btn.disabled = false; return;
+    }
+    const blob = zipOne(base + "-clean.wav", wav24(S.clean));
+    await dl.save({ filename: base + "-clean.zip", data: blob });
+    $("dlNote").textContent = "Saved " + base + "-clean.zip. Unzip it to get the WAV.";
+  } catch (e) {
+    const code = e && e.code;
+    $("dlNote").textContent = code === "declined" ? "Download cancelled." : code === "rate_limited" ? "A save prompt is already open. Finish it, then try again." : code === "too_large" ? "The file is too large to save here. Try a shorter recording." : "Couldn't save the file" + (e && e.message ? ": " + e.message : ".");
+  }
+  btn.disabled = false;
+});
+
+/* ---------- example clip: synthetic voice over fan, hiss and 50 Hz hum ---------- */
+function makeDemo() {
+  const c = ctx(), sr = c.sampleRate, dur = 9, L = Math.round(dur * sr);
+  let seed = 7; const rnd = () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+  const V = { a: [730, 1090, 2440], e: [530, 1840, 2480], i: [300, 2250, 3000], o: [570, 840, 2410], u: [330, 900, 2240] };
+  const BW = [70, 100, 130];
+  const phrases = [[0.8, [["e", .17, 1], ["o", .21], ["a", .26], ["i", .16], ["o", .34]]], [3.35, [["a", .19], ["e", .2, 1], ["u", .17], ["i", .23], ["a", .38]]], [6.05, [["o", .21], ["i", .18, 1], ["e", .24], ["a", .44]]]];
+  const syl = [];
+  for (const [t0, list] of phrases) {
+    let t = t0; const total = list.reduce((s, x) => s + x[1] + (x[2] ? .1 : 0), 0);
+    for (const [v, d, fr] of list) { if (fr) { syl.push({ fric: true, a: t, b: t + .11, t0, total }); t += .1; } syl.push({ v, a: t, b: t + d, c: t + d / 2, t0, total }); t += d; }
+  }
+  const vowels = syl.filter(s => !s.fric);
+  const voice = new Float32Array(L);
+  const env = t => { let e = 0; for (const s of vowels) { const a = s.a - .02, b = s.b + .03; if (t > a && t < b) { const u = (t - a) / (b - a); e = Math.max(e, Math.sin(Math.PI * u) ** 0.6); } } return e; };
+  const fmt3 = t => {
+    if (t <= vowels[0].c) return V[vowels[0].v];
+    for (let i = 0; i < vowels.length - 1; i++) { const A = vowels[i], B = vowels[i + 1]; if (t <= B.c) { let u = (t - A.c) / (B.c - A.c); u = u * u * (3 - 2 * u); return V[A.v].map((f, k) => f + (V[B.v][k] - f) * u); } }
+    return V[vowels[vowels.length - 1].v];
+  };
+  const f0At = t => { for (const s of vowels) if (t >= s.t0 - .05 && t <= s.t0 + s.total + .1) { const u = (t - s.t0) / s.total; return 150 - 42 * u + 14 * Math.sin(Math.PI * Math.min(1, u * 1.6)) + 2 * Math.sin(TWO * 5.3 * t); } return 120; };
+  const TWO = Math.PI * 2;
+  let ph = 0; const B = 64; const amps = new Float64Array(80);
+  for (let n0 = 0; n0 < L; n0 += B) {
+    const t = n0 / sr, e = env(t);
+    if (e <= 0) continue;
+    const f0 = f0At(t), F = fmt3(t), H = Math.min(79, Math.floor(5200 / f0));
+    for (let h = 1; h <= H; h++) {
+      const f = h * f0; let a = 1 / h;
+      for (let k = 0; k < 3; k++) { const Fk = F[k]; a *= (Fk * Fk) / Math.sqrt((Fk * Fk - f * f) ** 2 + (BW[k] * f) ** 2); }
+      amps[h] = a;
+    }
+    const dph = TWO * f0 * (1 + (rnd() - .5) * .004) / sr;
+    for (let n = n0; n < Math.min(L, n0 + B); n++) {
+      ph += dph; if (ph > TWO) ph -= TWO;
+      const s1 = Math.sin(ph), cph = 2 * Math.cos(ph); let sPrev = 0, sCur = s1, sum = 0;
+      for (let h = 1; h <= H; h++) { sum += amps[h] * sCur; const nx = cph * sCur - sPrev; sPrev = sCur; sCur = nx; }
+      voice[n] = e * (sum + (rnd() - .5) * 0.6);
+    }
+  }
+  let x1 = 0, x2 = 0;
+  for (const s of syl) if (s.fric) {
+    for (let n = Math.round(s.a * sr); n < Math.round(s.b * sr); n++) {
+      const u = (n / sr - s.a) / (s.b - s.a), w = rnd() * 2 - 1; const hp = w - 1.6 * x1 + 0.64 * x2; x2 = x1; x1 = w;
+      voice[n] += hp * 0.9 * Math.sin(Math.PI * u) ** 1.5;
+    }
+  }
+  let pk = 0; for (let i = 0; i < L; i++) pk = Math.max(pk, Math.abs(voice[i]));
+  for (let i = 0; i < L; i++) voice[i] *= 0.55 / pk;
+  const noise = new Float32Array(L);
+  let b0 = 0, b1 = 0, b2 = 0, br = 0, lp = 0;
+  for (let i = 0; i < L; i++) {
+    const wn = rnd() * 2 - 1, t = i / sr;
+    b0 = .99765 * b0 + wn * .099046; b1 = .963 * b1 + wn * .2965164; b2 = .57 * b2 + wn * 1.0526913;
+    const pink = (b0 + b1 + b2 + wn * .1848) * 0.11;
+    br = .995 * br + wn * .05; lp += (br - lp) * 0.08;
+    const fan = lp * (1 + 0.12 * Math.sin(TWO * 0.35 * t)) * 1.6;
+    const hum = .55 * Math.sin(TWO * 50 * t) + .38 * Math.sin(TWO * 100 * t + .4) + .3 * Math.sin(TWO * 150 * t + 1.1) + .16 * Math.sin(TWO * 250 * t + .2) + .12 * Math.sin(TWO * 350 * t + 2) + .07 * Math.sin(TWO * 450 * t);
+    noise[i] = pink + fan + hum * 0.045 + wn * 0.05;
+  }
+  let rms = 0; for (let i = 0; i < L; i++) rms += noise[i] * noise[i]; rms = Math.sqrt(rms / L);
+  const g = 0.022 / rms;
+  const buf = c.createBuffer(1, L, sr), d = buf.getChannelData(0);
+  for (let i = 0; i < L; i++) d[i] = Math.max(-1, Math.min(1, voice[i] + noise[i] * g));
+  return buf;
+}
+
+try {
+  S.orig = makeDemo(); S.name = "Example: voice over fan, hiss and 50 Hz hum"; S.isDemo = true;
+  updateFile(); updateNoiseUI(); runJob();
+} catch (e) {
+  $("fname").textContent = "Open a recording to begin"; setStatus("busy", "Waiting for a file");
+}
+})();
+</script>
+
+</body></html>

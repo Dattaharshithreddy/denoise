@@ -1,0 +1,43 @@
+plugins {
+    id 'com.android.application'
+}
+
+def env = { String k, String d -> System.getenv(k) ?: d }
+
+android {
+    namespace 'com.harshith.hush'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'com.harshith.hush'
+        minSdk 29
+        targetSdk 35
+        versionCode Integer.parseInt(env('VERSION_CODE', '1'))
+        versionName env('VERSION_NAME', '1.0.0')
+    }
+
+    signingConfigs {
+        release {
+            storeFile file(env('HUSH_KEYSTORE', "${rootDir}/keystore/hush-release.jks"))
+            storePassword env('HUSH_STORE_PASSWORD', 'hushrelease')
+            keyAlias env('HUSH_KEY_ALIAS', 'hush')
+            keyPassword env('HUSH_KEY_PASSWORD', 'hushrelease')
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.release
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    implementation 'androidx.webkit:webkit:1.12.1'
+}

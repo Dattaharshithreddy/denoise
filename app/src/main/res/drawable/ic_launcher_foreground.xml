@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <!-- Five waveform bars, tallest in the middle, fading to quiet at the edges -->
+    <path android:fillColor="#EDF1F2" android:pathData="M34,48h4a2,2 0 0,1 2,2v8a2,2 0 0,1 -2,2h-4a2,2 0 0,1 -2,-2v-8a2,2 0 0,1 2,-2z"/>
+    <path android:fillColor="#EDF1F2" android:pathData="M43,40h4a2,2 0 0,1 2,2v24a2,2 0 0,1 -2,2h-4a2,2 0 0,1 -2,-2v-24a2,2 0 0,1 2,-2z"/>
+    <path android:fillColor="#8199FF" android:pathData="M52,32h4a2,2 0 0,1 2,2v40a2,2 0 0,1 -2,2h-4a2,2 0 0,1 -2,-2v-40a2,2 0 0,1 2,-2z"/>
+    <path android:fillColor="#EDF1F2" android:pathData="M61,42h4a2,2 0 0,1 2,2v20a2,2 0 0,1 -2,2h-4a2,2 0 0,1 -2,-2v-20a2,2 0 0,1 2,-2z"/>
+    <path android:fillColor="#EDF1F2" android:pathData="M70,50h4a2,2 0 0,1 2,2v4a2,2 0 0,1 -2,2h-4a2,2 0 0,1 -2,-2v-4a2,2 0 0,1 2,-2z"/>
+</vector>

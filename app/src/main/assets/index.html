@@ -99,7 +99,11 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 .readout{display:grid;grid-template-columns:1fr auto;gap:4px 12px;font-size:13px}
 .readout dt{color:var(--muted)} .readout dd{margin:0;font-family:var(--mono);font-variant-numeric:tabular-nums;text-align:right}
 .readout .big{font-size:20px;color:var(--good);font-weight:500}
-.dlnote{font-size:12px;color:var(--muted);margin:0}
+.dlnote{font-size:12px;color:var(--muted);margin:0;font-variant-numeric:tabular-nums}
+.select{width:100%;padding:9px 34px 9px 12px;border-radius:8px;border:1px solid var(--line);background:var(--surface);color:var(--ink);font:inherit;font-size:14px;
+  appearance:none;background-image:linear-gradient(45deg,transparent 50%,var(--muted) 50%),linear-gradient(135deg,var(--muted) 50%,transparent 50%);
+  background-position:calc(100% - 17px) 55%,calc(100% - 12px) 55%;background-size:5px 5px;background-repeat:no-repeat;cursor:pointer}
+.select:disabled{opacity:.5}
 
 .drop{position:fixed;inset:0;display:grid;place-items:center;background:rgba(19,32,38,.55);z-index:20;color:#fff;font-family:var(--display);font-size:1.6rem;pointer-events:none}
 .foot{color:var(--muted);font-size:12.5px;max-width:75ch}
@@ -115,7 +119,7 @@ input[type=range]{width:100%;accent-color:var(--accent)}
       </div>
       <h1>Hush</h1>
     </div>
-    <p class="lede">Removes fan noise, hiss, mains hum and room tone from voice recordings. Processing runs on this device. Your audio is never uploaded.</p>
+    <p class="lede">Removes fan noise, hiss, mains hum and room tone from voice and video recordings. Processing runs on this device. Your audio is never uploaded.</p>
   </header>
 
   <section class="filebar">
@@ -125,7 +129,7 @@ input[type=range]{width:100%;accent-color:var(--accent)}
     </div>
     <div class="row">
       <label class="btn primary" for="file">Open audio or video</label>
-      <input type="file" id="file" accept="audio/*,video/*,.wav,.mp3,.m4a,.aac,.flac,.ogg,.opus,.webm,.mp4,.mov" hidden>
+      <input type="file" id="file" accept="audio/*,video/*,.wav,.mp3,.m4a,.aac,.flac,.ogg,.oga,.opus,.webm,.weba,.mp4,.m4v,.mov,.mkv,.3gp,.amr,.aif,.aiff,.caf,.ts" hidden>
     </div>
   </section>
 
@@ -189,8 +193,10 @@ input[type=range]{width:100%;accent-color:var(--accent)}
         </dl>
       </div>
       <div class="group">
-        <button class="btn primary" id="dl" disabled>Download cleaned audio</button>
-        <p class="dlnote" id="dlNote">Saves a .zip holding a lossless 24-bit WAV at the original sample rate.</p>
+        <div class="ghead"><label class="glabel" for="fmt">Save as</label></div>
+        <select id="fmt" class="select"></select>
+        <button class="btn primary" id="dl" disabled>Save cleaned file</button>
+        <p class="dlnote" id="dlNote">&nbsp;</p>
       </div>
     </aside>
   </main>
@@ -290,10 +296,11 @@ function detectHum(x, sr) {
   }
   const ratio = f => 10 * Math.log10((power(f) + 1e-30) / ((power(f - 4) + power(f + 4)) / 2 + 1e-30));
   const nyq = sr / 2 - 20;
-  function score(f0) { let s = 0, n = 0; for (let h = 1; h <= 8 && h * f0 < nyq; h++) { s += Math.max(-10, Math.min(40, ratio(h * f0))); n++; } return s / n; }
+  // Average of the three strongest of the first 8 harmonics, so sparse hum still registers.
+  function score(f0) { const r = []; for (let h = 1; h <= 8 && h * f0 < nyq; h++) r.push(Math.max(-10, Math.min(40, ratio(h * f0)))); r.sort((a, b) => b - a); const top = r.slice(0, 3); return top.reduce((a, b) => a + b, 0) / top.length; }
   const s50 = score(50), s60 = score(60);
   const f0 = s50 >= s60 ? 50 : 60, best = Math.max(s50, s60);
-  if (best < 4) return { f0: null, harmonics: [] };
+  if (best < 8) return { f0: null, harmonics: [] };
   const harmonics = [];
   for (let h = 1; h <= 24 && h * f0 < Math.min(2400, nyq); h++) if (ratio(h * f0) > 6) harmonics.push(h);
   if (!harmonics.length) return { f0: null, harmonics: [] };
@@ -496,6 +503,245 @@ function run({ channels, sr, opts, cols, rows }) {
 }
 </script>
 
+<script type="text/plain" id="enc-src">
+"use strict";
+// Hush encoder worker: WAV (16/24/32f), AIFF 24, FLAC 24 (written from scratch), MP3 (LAME).
+function prog(p) { postMessage({ type: "progress", p }); }
+
+function toInt(ch, bits, dither) {
+  const L = ch.length, out = new Int32Array(L), max = (1 << (bits - 1)) - 1, min = -max - 1;
+  let seed = 22222;
+  const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
+  for (let i = 0; i < L; i++) {
+    let v = ch[i] * (max + 1);
+    if (dither) v += rnd() - rnd();
+    v = Math.round(v);
+    out[i] = v > max ? max : v < min ? min : v;
+  }
+  return out;
+}
+
+function wav(chs, sr, bits) {
+  const C = chs.length, L = chs[0].length, float = bits === 32, bps = bits / 8;
+  const dataBytes = L * C * bps, head = float ? 58 : 44;
+  const out = new Uint8Array(head + dataBytes), v = new DataView(out.buffer);
+  const str = (o, s) => { for (let i = 0; i < s.length; i++) out[o + i] = s.charCodeAt(i); };
+  str(0, "RIFF"); v.setUint32(4, head - 8 + dataBytes, true); str(8, "WAVE"); str(12, "fmt ");
+  v.setUint32(16, float ? 18 : 16, true); v.setUint16(20, float ? 3 : 1, true); v.setUint16(22, C, true);
+  v.setUint32(24, sr, true); v.setUint32(28, sr * C * bps, true); v.setUint16(32, C * bps, true); v.setUint16(34, bits, true);
+  let o = 36;
+  if (float) { v.setUint16(36, 0, true); str(38, "fact"); v.setUint32(42, 4, true); v.setUint32(46, L, true); o = 50; }
+  str(o, "data"); v.setUint32(o + 4, dataBytes, true); o += 8;
+  if (float) {
+    for (let i = 0; i < L; i++) { for (let c = 0; c < C; c++) { v.setFloat32(o, chs[c][i], true); o += 4; } if ((i & 0x3ffff) === 0) prog(i / L); }
+  } else {
+    const ints = chs.map(ch => toInt(ch, bits, bits === 16));
+    for (let i = 0; i < L; i++) {
+      for (let c = 0; c < C; c++) {
+        const x = ints[c][i];
+        out[o++] = x & 255; out[o++] = (x >> 8) & 255; if (bits === 24) out[o++] = (x >> 16) & 255;
+      }
+      if ((i & 0x3ffff) === 0) prog(i / L);
+    }
+  }
+  return out;
+}
+
+function aiff(chs, sr) {
+  const C = chs.length, L = chs[0].length, dataBytes = L * C * 3;
+  const out = new Uint8Array(54 + dataBytes), v = new DataView(out.buffer);
+  const str = (o, s) => { for (let i = 0; i < s.length; i++) out[o + i] = s.charCodeAt(i); };
+  str(0, "FORM"); v.setUint32(4, 46 + dataBytes); str(8, "AIFF"); str(12, "COMM"); v.setUint32(16, 18);
+  v.setUint16(20, C); v.setUint32(22, L); v.setUint16(26, 24);
+  // 80-bit IEEE extended sample rate
+  let e = 16383 + 31, m = sr; while (m < 0x80000000) { m *= 2; e--; }
+  v.setUint16(28, e); v.setUint32(30, m >>> 0); v.setUint32(34, 0);
+  str(38, "SSND"); v.setUint32(42, 8 + dataBytes); v.setUint32(46, 0); v.setUint32(50, 0);
+  const ints = chs.map(ch => toInt(ch, 24, false));
+  let o = 54;
+  for (let i = 0; i < L; i++) {
+    for (let c = 0; c < C; c++) { const x = ints[c][i]; out[o++] = (x >> 16) & 255; out[o++] = (x >> 8) & 255; out[o++] = x & 255; }
+    if ((i & 0x3ffff) === 0) prog(i / L);
+  }
+  return out;
+}
+
+/* ---------------- FLAC ---------------- */
+class BitWriter {
+  constructor(cap) { this.buf = new Uint8Array(cap); this.pos = 0; this.acc = 0; this.n = 0; }
+  grow(need) { if (this.pos + need > this.buf.length) { const nb = new Uint8Array(Math.max(this.buf.length * 2, this.pos + need + 65536)); nb.set(this.buf.subarray(0, this.pos)); this.buf = nb; } }
+  bits(val, n) { // val unsigned, fits in n bits
+    if (n > 24) { this.bits(Math.floor(val / 65536) & 0xffff, n - 16); this.bits(val & 0xffff, 16); return; }
+    if (n === 0) return;
+    if (this.pos + 8 > this.buf.length) this.grow(8);
+    let acc = (this.acc << n) | (val & ((1 << n) - 1)), nb = this.n + n;
+    while (nb >= 8) { nb -= 8; this.buf[this.pos++] = (acc >>> nb) & 255; }
+    this.acc = acc & ((1 << nb) - 1); this.n = nb;
+  }
+  zeros(q) { while (q > 24) { this.bits(0, 24); q -= 24; } if (q) this.bits(0, q); }
+  align() { if (this.n) this.bits(0, 8 - this.n); }
+  bytes() { return this.buf.subarray(0, this.pos); }
+}
+const CRC8 = new Uint8Array(256), CRC16 = new Uint16Array(256);
+for (let i = 0; i < 256; i++) {
+  let c = i; for (let k = 0; k < 8; k++) c = (c & 0x80) ? ((c << 1) ^ 0x07) & 255 : (c << 1) & 255; CRC8[i] = c;
+  let d = i << 8; for (let k = 0; k < 8; k++) d = (d & 0x8000) ? ((d << 1) ^ 0x8005) & 0xffff : (d << 1) & 0xffff; CRC16[i] = d;
+}
+function crc8(b, s, e) { let c = 0; for (let i = s; i < e; i++) c = CRC8[c ^ b[i]]; return c; }
+function crc16(b, s, e) { let c = 0; for (let i = s; i < e; i++) c = ((c << 8) ^ CRC16[(c >> 8) ^ b[i]]) & 0xffff; return c; }
+
+function fixedResidual(x, order, res) {
+  const n = x.length;
+  for (let i = order; i < n; i++) {
+    switch (order) {
+      case 0: res[i] = x[i]; break;
+      case 1: res[i] = x[i] - x[i - 1]; break;
+      case 2: res[i] = x[i] - 2 * x[i - 1] + x[i - 2]; break;
+      case 3: res[i] = x[i] - 3 * x[i - 1] + 3 * x[i - 2] - x[i - 3]; break;
+      default: res[i] = x[i] - 4 * x[i - 1] + 6 * x[i - 2] - 4 * x[i - 3] + x[i - 4];
+    }
+  }
+}
+// Estimated Rice cost of a partition from its count and sum of zigzag values.
+function riceEst(n, sum) {
+  if (n <= 0) return [0, 0];
+  const mean = sum / n; let k = mean > 1 ? Math.min(30, Math.floor(Math.log2(mean))) : 0;
+  let best = [0, Infinity];
+  for (let kk = Math.max(0, k - 1); kk <= Math.min(30, k + 1); kk++) {
+    const c = n * (kk + 1) + Math.max(0, (sum - n * (Math.pow(2, kk) - 1) / 2)) / Math.pow(2, kk);
+    if (c < best[1]) best = [kk, c];
+  }
+  return best;
+}
+const PMAX = 6;
+function encodeSubframe(bw, x, bps, res, u) {
+  const n = x.length;
+  let constant = true; for (let i = 1; i < n; i++) if (x[i] !== x[0]) { constant = false; break; }
+  if (constant) { bw.bits(0, 8); bw.bits(x[0] & (Math.pow(2, bps) - 1), bps); return; }
+  // One pass: total |residual| for fixed orders 0..4.
+  const tot = [0, 0, 0, 0, 0];
+  let a = 0, b = 0, c = 0, d = 0;
+  for (let i = 0; i < n; i++) {
+    const e0 = x[i], e1 = e0 - (i > 0 ? x[i - 1] : 0), e2 = e1 - a, e3 = e2 - b, e4 = e3 - c;
+    if (i >= 4) { tot[0] += Math.abs(e0); tot[1] += Math.abs(e1); tot[2] += Math.abs(e2); tot[3] += Math.abs(e3); tot[4] += Math.abs(e4); }
+    a = e1; b = e2; c = e3; d = e4;
+  }
+  let order = 0; for (let o = 1; o <= Math.min(4, n - 1); o++) if (tot[o] < tot[order]) order = o;
+  fixedResidual(x, order, res);
+  for (let i = order; i < n; i++) { const r = res[i]; u[i] = r >= 0 ? 2 * r : -2 * r - 1; }
+  // Partition sums at the finest usable order, merged upward.
+  let pTop = 0; while (pTop < PMAX && n % (1 << (pTop + 1)) === 0 && (n >> (pTop + 1)) > order) pTop++;
+  let sums = new Float64Array(1 << pTop), cnts = new Int32Array(1 << pTop);
+  const ps0 = n >> pTop;
+  for (let j = 0; j < (1 << pTop); j++) { const s0 = j === 0 ? order : j * ps0, e0 = (j + 1) * ps0; let s = 0; for (let i = s0; i < e0; i++) s += u[i]; sums[j] = s; cnts[j] = e0 - s0; }
+  let bestP = 0, bestCost = Infinity, bestKs = null;
+  for (let p = pTop; p >= 0; p--) {
+    let cost = 0; const ks = new Array(1 << p);
+    for (let j = 0; j < (1 << p); j++) { const [k, cst] = riceEst(cnts[j], sums[j]); ks[j] = k; cost += cst + 5; }
+    if (cost < bestCost) { bestCost = cost; bestP = p; bestKs = ks; }
+    if (p > 0) { const ns = new Float64Array(1 << (p - 1)), nc = new Int32Array(1 << (p - 1)); for (let j = 0; j < ns.length; j++) { ns[j] = sums[2 * j] + sums[2 * j + 1]; nc[j] = cnts[2 * j] + cnts[2 * j + 1]; } sums = ns; cnts = nc; }
+  }
+  if (bestCost + order * bps + 16 > n * bps) {
+    bw.bits(0b00000010, 8);
+    const m = Math.pow(2, bps) - 1;
+    for (let i = 0; i < n; i++) bw.bits(x[i] & m, bps);
+    return;
+  }
+  bw.bits(0b00010000 | (order << 1), 8);
+  for (let i = 0; i < order; i++) bw.bits((x[i] + Math.pow(2, bps)) % Math.pow(2, bps), bps);
+  bw.bits(1, 2); bw.bits(bestP, 4); // RICE2 (5-bit parameters)
+  const ps = n >> bestP;
+  for (let j = 0; j < (1 << bestP); j++) {
+    const k = bestKs[j], s0 = j === 0 ? order : j * ps, e0 = (j + 1) * ps;
+    bw.bits(k, 5);
+    const mask = k ? (k >= 31 ? 0x7fffffff : (1 << k) - 1) : 0;
+    for (let i = s0; i < e0; i++) {
+      const v = u[i], q = Math.floor(v / Math.pow(2, k));
+      if (q + 1 + k <= 24) { bw.bits((1 << k) | (v & mask), q + 1 + k); }
+      else { bw.zeros(q); bw.bits(1, 1); if (k) bw.bits(v % Math.pow(2, k), k); }
+    }
+  }
+}
+function utf8Num(bw, v) {
+  if (v < 0x80) { bw.bits(v, 8); return; }
+  const bytes = []; let n = v, cnt = 0;
+  while (true) { bytes.unshift(0x80 | (n & 0x3f)); n = Math.floor(n / 64); cnt++; if (n < (1 << (6 - cnt))) break; }
+  const lead = ((0xff << (7 - cnt)) & 0xff) | n;
+  bw.bits(lead, 8); for (const b of bytes) bw.bits(b, 8);
+}
+function flac(chs, sr, bps) {
+  const C = chs.length, L = chs[0].length, BS = 4096;
+  const ints = chs.map(ch => toInt(ch, bps, bps === 16));
+  const bw = new BitWriter(Math.max(1 << 20, L * C * 2));
+  // "fLaC" + STREAMINFO (last metadata block)
+  for (const ch of "fLaC") bw.bits(ch.charCodeAt(0), 8);
+  bw.bits(0x80, 8); bw.bits(34, 24);
+  bw.bits(BS, 16); bw.bits(BS, 16); bw.bits(0, 24); bw.bits(0, 24);
+  bw.bits(sr, 20); bw.bits(C - 1, 3); bw.bits(bps - 1, 5);
+  bw.bits(Math.floor(L / 4294967296) & 15, 4); bw.bits(L >>> 0, 32);
+  for (let i = 0; i < 16; i++) bw.bits(0, 8);
+  const res = new Int32Array(BS), u = new Float64Array(BS);
+  const bpsCode = { 8: 1, 12: 2, 16: 4, 20: 5, 24: 6 }[bps];
+  let frame = 0;
+  for (let s = 0; s < L; s += BS, frame++) {
+    const n = Math.min(BS, L - s), start = bw.pos;
+    bw.bits(0xFFF8, 16);
+    bw.bits(n === BS ? 0b1100 : 0b0111, 4); bw.bits(0, 4);
+    bw.bits(C - 1, 4); bw.bits(bpsCode, 3); bw.bits(0, 1);
+    utf8Num(bw, frame);
+    if (n !== BS) bw.bits(n - 1, 16);
+    bw.bits(crc8(bw.buf, start, bw.pos), 8);
+    for (let c = 0; c < C; c++) encodeSubframe(bw, ints[c].subarray(s, s + n), bps, res, u);
+    bw.align();
+    bw.bits(crc16(bw.buf, start, bw.pos), 16);
+    if ((frame & 63) === 0) prog(s / L);
+  }
+  return bw.bytes().slice();
+}
+
+/* ---------------- MP3 via LAME ---------------- */
+function mp3(chs, sr, kbps, lameURL) {
+  if (typeof lamejs === "undefined") importScripts(lameURL);
+  const C = Math.min(2, chs.length), L = chs[0].length;
+  const src = chs.length > 2 ? [chs[0], chs[1]] : chs;
+  const enc = new lamejs.Mp3Encoder(C, sr, kbps);
+  const ints = src.slice(0, C).map(ch => { const a = toInt(ch, 16, true), s = new Int16Array(L); for (let i = 0; i < L; i++) s[i] = a[i]; return s; });
+  const parts = []; let total = 0; const B = 1152 * 16;
+  for (let i = 0; i < L; i += B) {
+    const l = ints[0].subarray(i, i + B), r = C > 1 ? ints[1].subarray(i, i + B) : undefined;
+    const buf = C > 1 ? enc.encodeBuffer(l, r) : enc.encodeBuffer(l);
+    if (buf.length) { parts.push(new Uint8Array(buf)); total += buf.length; }
+    if ((i / B & 15) === 0) prog(i / L);
+  }
+  const end = enc.flush(); if (end.length) { parts.push(new Uint8Array(end)); total += end.length; }
+  const out = new Uint8Array(total); let o = 0; for (const p of parts) { out.set(p, o); o += p.length; }
+  return out;
+}
+
+self.onmessage = e => {
+  const { format, channels, sr, lameURL } = e.data;
+  try {
+    let out;
+    switch (format) {
+      case "wav16": out = wav(channels, sr, 16); break;
+      case "wav24": out = wav(channels, sr, 24); break;
+      case "wav32": out = wav(channels, sr, 32); break;
+      case "aiff": out = aiff(channels, sr); break;
+      case "flac": out = flac(channels, sr, 24); break;
+      case "mp3_320": out = mp3(channels, sr, 320, lameURL); break;
+      case "mp3_192": out = mp3(channels, sr, 192, lameURL); break;
+      case "pcm16": { // interleaved 16-bit for the Android encoders
+        const C = channels.length, L = channels[0].length, ints = channels.map(c => toInt(c, 16, true));
+        const o = new Int16Array(L * C); for (let i = 0; i < L; i++) for (let c = 0; c < C; c++) o[i * C + c] = ints[c][i];
+        out = new Uint8Array(o.buffer); break;
+      }
+      default: throw new Error("Unknown format " + format);
+    }
+    postMessage({ type: "done", bytes: out }, [out.buffer]);
+  } catch (err) { postMessage({ type: "error", message: String((err && err.message) || err) }); }
+};
+</script>
+
 <script>
 (() => {
 "use strict";
@@ -506,8 +752,10 @@ const workerURL = URL.createObjectURL(new Blob([$("dsp-src").textContent], { typ
 const S = {
   name: "", isDemo: false, orig: null, clean: null, sel: null, noiseRegion: null, listen: "clean",
   opts: { reduction: 20, mode: "steady", hum: true, highpass: true, normalize: false },
-  worker: null, job: 0, playing: false, cursor: 0, startTime: 0, startOffset: 0, loop: null, srcs: null, last: null
+  worker: null, job: 0, playing: false, cursor: 0, startTime: 0, startOffset: 0, loop: null, srcs: null, last: null,
+  hasVideo: false, videoMime: ""
 };
+const native = window.HushNative || null;
 
 let ac = null, gO = null, gC = null;
 function ctx() {
@@ -596,25 +844,51 @@ function applyResult(m) {
 }
 
 /* ---------- file loading ---------- */
+function sourceInfo() {
+  if (!native) return {};
+  try { return JSON.parse(native.sourceInfo() || "{}"); } catch (e) { return {}; }
+}
+function decodeWeb(data) {
+  return new Promise((res, rej) => { const p = ctx().decodeAudioData(data, res, rej); if (p && p.catch) p.catch(rej); });
+}
 async function loadFile(file) {
   if (!file) return;
   stop(); setStatus("busy", "Reading file");
-  let ab;
-  try {
-    const data = await file.arrayBuffer();
-    ab = await new Promise((res, rej) => { const p = ctx().decodeAudioData(data, res, rej); if (p && p.catch) p.catch(rej); });
-  } catch (e) {
-    setStatus("err", "Couldn't read audio from that file. Try WAV, MP3, M4A, FLAC, OGG or MP4."); return;
+  const info = sourceInfo();
+  let ab = null, why = "";
+  // Big videos go straight to Android's decoder instead of loading the whole file into the page.
+  if (!(native && info.hasVideo)) {
+    try { ab = await decodeWeb(await file.arrayBuffer()); } catch (e) { ab = null; }
   }
-  if (ab.duration > 30 * 60) { setStatus("err", "That file is over 30 minutes. Trim it into shorter parts first."); return; }
-  S.orig = ab; S.clean = null; S.name = file.name; S.isDemo = false; S.sel = null; S.noiseRegion = null; S.cursor = 0;
-  updateFile(); updateNoiseUI(); renderOverlay(); runJob();
+  if (!ab && native) {
+    try { ab = await decodeNative(p => setStatus("busy", "Reading file " + pct(p))); }
+    catch (e) { why = e.message; }
+  }
+  if (!ab) {
+    setStatus("err", why ? "Couldn't read audio from that file: " + why : "Couldn't read audio from that file. Try WAV, MP3, M4A, FLAC, OGG or MP4.");
+    return;
+  }
+  openBuffer(ab, file.name, info);
 }
+function openBuffer(ab, name, info) {
+  if (ab.duration > 30 * 60) { setStatus("err", "That file is over 30 minutes. Trim it into shorter parts first."); return; }
+  S.orig = ab; S.clean = null; S.name = name; S.isDemo = false; S.sel = null; S.noiseRegion = null; S.cursor = 0;
+  S.hasVideo = !!info.hasVideo; S.videoMime = info.videoMime || "";
+  buildFormats(); updateFile(); updateNoiseUI(); renderOverlay(); runJob();
+}
+// Called by the Android app for "Open with" and "Share to Hush".
+window.hushOpenNative = async name => {
+  if (!native) return;
+  stop(); setStatus("busy", "Reading file");
+  const info = sourceInfo();
+  try { openBuffer(await decodeNative(p => setStatus("busy", "Reading file " + pct(p))), name || "Shared audio", info); }
+  catch (e) { setStatus("err", "Couldn't read audio from that file: " + e.message); }
+};
 function updateFile() {
   const o = S.orig;
   $("fname").textContent = S.name; $("demotag").hidden = !S.isDemo;
   const ch = o.numberOfChannels === 1 ? "mono" : o.numberOfChannels === 2 ? "stereo" : o.numberOfChannels + " channels";
-  $("fmeta").textContent = `${fmt(o.duration)} · ${(o.sampleRate / 1000).toFixed(1).replace(/\.0$/, "")} kHz · ${ch}`;
+  $("fmeta").textContent = `${S.hasVideo ? "video · " : ""}${fmt(o.duration)} · ${(o.sampleRate / 1000).toFixed(1).replace(/\.0$/, "")} kHz · ${ch}`;
   const ax = $("taxis").children; ax[0].textContent = "0:00"; ax[1].textContent = fmtShort(o.duration / 2); ax[2].textContent = fmtShort(o.duration);
   updateClock();
 }
@@ -734,47 +1008,139 @@ function updateNoiseUI() {
 $("learn").addEventListener("click", () => { if (!S.sel) return; S.noiseRegion = [S.sel.a, S.sel.b]; updateNoiseUI(); runJob(); });
 $("auto").addEventListener("click", () => { S.noiseRegion = null; updateNoiseUI(); runJob(); });
 
-/* ---------- download: 24-bit WAV inside a stored ZIP ---------- */
-let dl = null;
-const native = window.HushNative || null;
-if (native) {
-  dl = { native: true };
-  $("dl").textContent = "Save cleaned WAV";
-  $("dlNote").textContent = "Saves a lossless 24-bit WAV to Downloads/Hush on this phone.";
-} else (async () => {
-  try { dl = window.claude && window.claude.use ? await window.claude.use("downloads") : null; } catch (e) { dl = null; }
-  if (!dl) { $("dl").disabled = true; $("dlNote").textContent = "Saving files isn't available in this view. Open the page in claude.ai to download."; }
-  else if (S.clean) $("dl").disabled = false;
-})();
-async function saveNative(name, bytes) {
-  const err0 = native.begin(name); if (err0) throw new Error(err0);
-  const CH = 786432;
-  try {
-    for (let o = 0; o < bytes.length; o += CH) {
-      const part = bytes.subarray(o, Math.min(bytes.length, o + CH));
-      let bin = ""; for (let i = 0; i < part.length; i += 32768) bin += String.fromCharCode.apply(null, part.subarray(i, i + 32768));
-      const err = native.write(btoa(bin)); if (err) throw new Error(err);
-      $("dlNote").textContent = "Saving " + Math.round(Math.min(1, (o + CH) / bytes.length) * 100) + "%";
-      await new Promise(r => setTimeout(r, 0));
-    }
-  } catch (e) { native.abort(); throw e; }
-  return native.finish();
+/* ---------- saving: every format ---------- */
+const encURL = URL.createObjectURL(new Blob([$("enc-src").textContent], { type: "text/javascript" }));
+const lameURL = native ? new URL("lame.min.js", location.href).href : "https://cdn.jsdelivr.net/npm/lamejs@1.2.1/lame.min.js";
+const FORMATS = [
+  { id: "wav24", label: "WAV · 24-bit · lossless", ext: "wav", mime: "audio/wav", group: "Lossless" },
+  { id: "flac", label: "FLAC · 24-bit · lossless, smaller", ext: "flac", mime: "audio/flac", group: "Lossless" },
+  { id: "wav16", label: "WAV · 16-bit · CD quality", ext: "wav", mime: "audio/wav", group: "Lossless" },
+  { id: "wav32", label: "WAV · 32-bit float", ext: "wav", mime: "audio/wav", group: "Lossless" },
+  { id: "aiff", label: "AIFF · 24-bit · for Apple apps", ext: "aiff", mime: "audio/aiff", group: "Lossless" },
+  { id: "mp3_320", label: "MP3 · 320 kbps", ext: "mp3", mime: "audio/mpeg", group: "Compressed" },
+  { id: "mp3_192", label: "MP3 · 192 kbps · smaller", ext: "mp3", mime: "audio/mpeg", group: "Compressed" },
+  { id: "m4a", label: "M4A · AAC 256 kbps", native: true, group: "Compressed" },
+  { id: "ogg", label: "OGG · Opus 160 kbps", native: true, group: "Compressed" },
+  { id: "video", label: "Video · original picture, cleaned sound", native: true, video: true, group: "Video" }
+];
+const pct = p => Math.round(Math.max(0, Math.min(1, p)) * 100) + "%";
+const tick = () => new Promise(r => setTimeout(r, 0));
+function noteForFormat() {
+  const f = FORMATS.find(x => x.id === $("fmt").value);
+  if (!f) return;
+  try { localStorage.setItem("hush.fmt", f.id); } catch (e) {}
+  let t;
+  if (!dl) t = "Saving files isn't available in this view. Open the page in claude.ai to download.";
+  else if (f.video) t = (S.videoMime === "video/x-vnd.on2.vp8" || S.videoMime === "video/x-vnd.on2.vp9" ? "WebM" : "MP4") + " with the original picture untouched and the cleaned sound swapped in. Saves to Downloads/Hush.";
+  else if (dl.native) t = "Saves to Downloads/Hush on this phone.";
+  else t = "Saved inside a .zip, since this view can't hand over " + f.ext.toUpperCase() + " files directly.";
+  $("dlNote").textContent = t;
 }
-function wav24(buf) {
-  const C = buf.numberOfChannels, L = buf.length, sr = buf.sampleRate, bytes = L * C * 3;
-  const out = new Uint8Array(44 + bytes), v = new DataView(out.buffer);
-  const str = (o, s) => { for (let i = 0; i < s.length; i++) out[o + i] = s.charCodeAt(i); };
-  str(0, "RIFF"); v.setUint32(4, 36 + bytes, true); str(8, "WAVE"); str(12, "fmt ");
-  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, C, true); v.setUint32(24, sr, true);
-  v.setUint32(28, sr * C * 3, true); v.setUint16(32, C * 3, true); v.setUint16(34, 24, true); str(36, "data"); v.setUint32(40, bytes, true);
-  const chs = []; for (let c = 0; c < C; c++) chs.push(buf.getChannelData(c));
-  let o = 44;
-  for (let i = 0; i < L; i++) for (let c = 0; c < C; c++) {
-    let s = Math.max(-1, Math.min(1, chs[c][i])); let x = Math.round(s * 8388607); if (x < 0) x += 16777216;
-    out[o++] = x & 255; out[o++] = (x >> 8) & 255; out[o++] = (x >> 16) & 255;
+function buildFormats() {
+  const sel = $("fmt");
+  let prev = sel.value; if (!prev) { try { prev = localStorage.getItem("hush.fmt"); } catch (e) { prev = null; } }
+  sel.textContent = "";
+  const groups = {};
+  for (const f of FORMATS) {
+    if (f.native && !native) continue;
+    if (f.video && !S.hasVideo) continue;
+    if (!groups[f.group]) { groups[f.group] = document.createElement("optgroup"); groups[f.group].label = f.group; sel.appendChild(groups[f.group]); }
+    const o = document.createElement("option"); o.value = f.id; o.textContent = f.label; groups[f.group].appendChild(o);
   }
-  return out;
+  const has = id => !!sel.querySelector('option[value="' + id + '"]');
+  sel.value = S.hasVideo ? "video" : (prev && prev !== "video" && has(prev) ? prev : "wav24");
+  noteForFormat();
 }
+$("fmt").addEventListener("change", noteForFormat);
+
+let dl = null;
+if (native) { dl = { native: true }; buildFormats(); }
+else {
+  buildFormats();
+  (async () => {
+    try { dl = window.claude && window.claude.use ? await window.claude.use("downloads") : null; } catch (e) { dl = null; }
+    $("dl").disabled = !(dl && S.clean); noteForFormat();
+  })();
+}
+
+// Encode in a worker so the screen stays responsive.
+function encodeJS(format, buf, onProg) {
+  return new Promise((res, rej) => {
+    const w = new Worker(encURL);
+    const chans = []; for (let c = 0; c < buf.numberOfChannels; c++) chans.push(buf.getChannelData(c).slice());
+    w.onmessage = e => {
+      const m = e.data;
+      if (m.type === "progress") onProg && onProg(m.p);
+      else { w.terminate(); m.type === "done" ? res(m.bytes) : rej(new Error(m.message)); }
+    };
+    w.onerror = e => { w.terminate(); rej(new Error(e.message || "Encoder failed")); };
+    w.postMessage({ format, channels: chans, sr: buf.sampleRate, lameURL }, chans.map(c => c.buffer));
+  });
+}
+async function resample(buf, rate) {
+  if (buf.sampleRate === rate) return buf;
+  const OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+  const oc = new OAC(buf.numberOfChannels, Math.ceil(buf.duration * rate), rate);
+  const src = oc.createBufferSource(); src.buffer = buf; src.connect(oc.destination); src.start();
+  return oc.startRendering();
+}
+// Hand bytes to the Android side in base64 chunks.
+async function pushChunks(bytes, write, onProg) {
+  const CH = 786432;
+  for (let o = 0; o < bytes.length; o += CH) {
+    const part = bytes.subarray(o, Math.min(bytes.length, o + CH));
+    let bin = ""; for (let i = 0; i < part.length; i += 32768) bin += String.fromCharCode.apply(null, part.subarray(i, i + 32768));
+    const err = write(btoa(bin)); if (err) throw new Error(err);
+    onProg && onProg(Math.min(1, (o + CH) / bytes.length));
+    await tick();
+  }
+}
+async function saveNative(name, mime, bytes, onProg) {
+  const err0 = native.begin(name, mime); if (err0) throw new Error(err0);
+  try { await pushChunks(bytes, b => native.write(b), onProg); }
+  catch (e) { native.abort(); throw e; }
+  const where = native.finish();
+  if (where.startsWith("ERR:")) throw new Error(where.slice(4));
+  return where;
+}
+// Background jobs on the Android side report back through window.__hushNative.
+const nativeJobs = {}; let nativeSeq = 0;
+window.__hushNative = json => { let m; try { m = JSON.parse(json); } catch (e) { return; } const h = nativeJobs[m.id]; if (h) h(m); };
+function nativeJob(start, onProg) {
+  return new Promise((res, rej) => {
+    const id = "j" + (++nativeSeq);
+    nativeJobs[id] = m => {
+      if (m.type === "progress") { onProg && onProg(m.p); return; }
+      delete nativeJobs[id];
+      m.type === "done" ? res(m) : rej(new Error(m.message || "Failed"));
+    };
+    const err = start(id);
+    if (err) { delete nativeJobs[id]; rej(new Error(err)); }
+  });
+}
+async function decodeNative(onProg) {
+  const r = await nativeJob(id => native.decodeSource(id), p => onProg && onProg(p * 0.8));
+  const C = r.ch, frames = r.frames;
+  if (!(frames > 0) || !(C > 0)) throw new Error("No audio could be decoded from this file.");
+  const buf = ctx().createBuffer(C, frames, r.sr);
+  const chans = []; for (let c = 0; c < C; c++) chans.push(buf.getChannelData(c));
+  const CH = C * 2 * 262144; let off = 0, frame = 0;
+  try {
+    while (off < r.bytes && frame < frames) {
+      const b64 = native.readDecoded(off, CH);
+      if (!b64) throw new Error("Couldn't read the decoded audio.");
+      const bin = atob(b64), n = bin.length, u8 = new Uint8Array(n);
+      for (let i = 0; i < n; i++) u8[i] = bin.charCodeAt(i);
+      const i16 = new Int16Array(u8.buffer, 0, n >> 1), fr = Math.floor(i16.length / C);
+      for (let i = 0; i < fr && frame < frames; i++, frame++) for (let k = 0; k < C; k++) chans[k][frame] = i16[i * C + k] / 32768;
+      off += n;
+      onProg && onProg(0.8 + 0.2 * off / r.bytes);
+      await tick();
+    }
+  } finally { native.releaseDecoded(); }
+  return buf;
+}
+
 const CRC = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
 function crc32(d) { let c = 0xFFFFFFFF; for (let i = 0; i < d.length; i++) c = CRC[(c ^ d[i]) & 255] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; }
 function zipOne(name, data) {
@@ -794,24 +1160,36 @@ function zipOne(name, data) {
 }
 $("dl").addEventListener("click", async () => {
   if (!dl || !S.clean) return;
-  const btn = $("dl"); btn.disabled = true; $("dlNote").textContent = "Preparing file…";
-  await new Promise(r => setTimeout(r, 30));
+  const f = FORMATS.find(x => x.id === $("fmt").value) || FORMATS[0];
+  const btn = $("dl"), sel = $("fmt"), note = t => { $("dlNote").textContent = t; };
+  btn.disabled = true; sel.disabled = true;
+  const base = ((S.name || "audio").replace(/\.[^.]+$/, "").replace(/[\\/:*?"<>|]+/g, "_") || "audio") + "-clean";
   try {
-    const base = (S.name || "audio").replace(/\.[^.]+$/, "").replace(/[\\/:*?"<>|]+/g, "_") || "audio";
-    if (dl.native) {
-      const where = await saveNative(base + "-clean.wav", wav24(S.clean));
-      if (where && where.startsWith("ERR:")) throw new Error(where.slice(4));
-      $("dlNote").textContent = "Saved to " + where + ".";
-      btn.disabled = false; return;
+    if (f.native) {
+      note("Preparing audio…");
+      const buf = await resample(S.clean, 48000);
+      const pcm = await encodeJS("pcm16", buf, p => note("Preparing audio " + pct(p * 0.5)));
+      const e0 = native.pcmBegin(buf.sampleRate, buf.numberOfChannels); if (e0) throw new Error(e0);
+      await pushChunks(pcm, b => native.pcmWrite(b), p => note("Preparing audio " + pct(0.5 + p * 0.5)));
+      const e1 = native.pcmEnd(); if (e1) throw new Error(e1);
+      const r = await nativeJob(id => native.exportMedia(id, f.id, base), p => note((f.video ? "Building video " : "Encoding ") + pct(p)));
+      note("Saved to " + r.path + ".");
+    } else {
+      const bytes = await encodeJS(f.id, S.clean, p => note("Encoding " + pct(p)));
+      if (dl.native) {
+        const where = await saveNative(base + "." + f.ext, f.mime, bytes, p => note("Saving " + pct(p)));
+        note("Saved to " + where + ".");
+      } else {
+        note("Preparing download…");
+        await dl.save({ filename: base + ".zip", data: zipOne(base + "." + f.ext, bytes) });
+        note("Saved " + base + ".zip. Unzip it to get the " + f.ext.toUpperCase() + " file.");
+      }
     }
-    const blob = zipOne(base + "-clean.wav", wav24(S.clean));
-    await dl.save({ filename: base + "-clean.zip", data: blob });
-    $("dlNote").textContent = "Saved " + base + "-clean.zip. Unzip it to get the WAV.";
   } catch (e) {
     const code = e && e.code;
-    $("dlNote").textContent = code === "declined" ? "Download cancelled." : code === "rate_limited" ? "A save prompt is already open. Finish it, then try again." : code === "too_large" ? "The file is too large to save here. Try a shorter recording." : "Couldn't save the file" + (e && e.message ? ": " + e.message : ".");
+    note(code === "declined" ? "Download cancelled." : code === "rate_limited" ? "A save prompt is already open. Finish it, then try again." : code === "too_large" ? "The file is too large to save here. Try a shorter recording or a compressed format." : "Couldn't save the file" + (e && e.message ? ": " + e.message : "."));
   }
-  btn.disabled = false;
+  btn.disabled = false; sel.disabled = false;
 });
 
 /* ---------- example clip: synthetic voice over fan, hiss and 50 Hz hum ---------- */
@@ -870,9 +1248,9 @@ function makeDemo() {
     b0 = .99765 * b0 + wn * .099046; b1 = .963 * b1 + wn * .2965164; b2 = .57 * b2 + wn * 1.0526913;
     const pink = (b0 + b1 + b2 + wn * .1848) * 0.11;
     br = .995 * br + wn * .05; lp += (br - lp) * 0.08;
-    const fan = lp * (1 + 0.12 * Math.sin(TWO * 0.35 * t)) * 1.6;
+    const fan = lp * (1 + 0.12 * Math.sin(TWO * 0.35 * t)) * 0.7;
     const hum = .55 * Math.sin(TWO * 50 * t) + .38 * Math.sin(TWO * 100 * t + .4) + .3 * Math.sin(TWO * 150 * t + 1.1) + .16 * Math.sin(TWO * 250 * t + .2) + .12 * Math.sin(TWO * 350 * t + 2) + .07 * Math.sin(TWO * 450 * t);
-    noise[i] = pink + fan + hum * 0.045 + wn * 0.05;
+    noise[i] = pink + fan + hum * 0.16 + wn * 0.05;
   }
   let rms = 0; for (let i = 0; i < L; i++) rms += noise[i] * noise[i]; rms = Math.sqrt(rms / L);
   const g = 0.022 / rms;

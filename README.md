@@ -1,6 +1,22 @@
 # Hush
 
-Background noise remover for voice recordings. Android app (APK) built around a from-scratch DSP engine that runs fully on the device.
+Background noise remover for voice and video recordings. Android app (APK) built around a from-scratch DSP engine that runs fully on the device.
+
+## Formats
+
+**Opens:** anything Android or the WebView can decode — MP3, WAV, M4A/AAC, FLAC, OGG/Opus, AMR, 3GP, AIFF, WebM, MP4, MOV, MKV. Files the WebView can't read fall back to Android's own decoders. Supports **Share → Hush** and **Open with → Hush**.
+
+**Saves** to `Downloads/Hush`:
+
+| Format | Encoder |
+| --- | --- |
+| WAV 16 / 24-bit, 32-bit float | built in |
+| FLAC 24-bit | built in (fixed-predictor + Rice coding, written from scratch) |
+| AIFF 24-bit | built in |
+| MP3 320 / 192 kbps | LAME (lamejs, bundled offline) |
+| M4A (AAC-LC 256 kbps) | Android MediaCodec |
+| OGG (Opus 160 kbps) | Android MediaCodec |
+| Video (MP4 or WebM) | original video track copied untouched, cleaned audio muxed in |
 
 ## How the denoiser works
 
